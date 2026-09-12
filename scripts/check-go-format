@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+golangci-lint config verify
+diff_file=$(mktemp)
+trap 'rm -f "$diff_file"' EXIT
+# Do not rely on fmt's exit status: some versions print a diff and exit zero.
+if ! golangci-lint fmt --diff >"$diff_file"; then
+    cat "$diff_file" >&2
+    exit 1
+fi
+if [[ -s "$diff_file" ]]; then
+    cat "$diff_file" >&2
+    echo 'Go formatting differs; run golangci-lint fmt and commit the result.' >&2
+    exit 1
+fi

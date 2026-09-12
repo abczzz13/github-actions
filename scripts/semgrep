@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+rules=()
+while IFS= read -r rule; do
+    [[ -n "$rule" ]] || continue
+    if [[ ! "$rule" =~ ^[a-zA-Z0-9_/-]+$ || "$rule" == /* ]]; then
+        echo 'Semgrep rules must be relative paths in the pinned rule set.' >&2
+        exit 1
+    fi
+    rules+=(--config "/src/.semgrep-rules/$rule")
+done <<<"${SEMGREP_RULES:?At least one rule path is required}"
+if ((${#rules[@]} == 0)); then
+    echo 'At least one Semgrep rule path is required.' >&2
+    exit 1
+fi
+
+docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+    --volume "$PWD:/src:ro" --workdir /src \
+    docker.io/returntocorp/semgrep:1.170.0@sha256:c98f8829eea377274ee4b10656458b078b88232469b2ff913f091c2317347c9d \
+    semgrep scan --error --metrics off --disable-version-check \
+    --exclude .semgrep-rules --exclude vendor "${rules[@]}" .

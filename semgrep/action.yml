@@ -1,0 +1,24 @@
+name: Semgrep
+description: Scan Go with pinned, selected high-signal security rules on a Docker-capable Linux runner.
+inputs:
+  rules:
+    description: Newline-separated paths within the pinned semgrep-rules checkout.
+    default: |
+      go/lang/security/deserialization
+      go/lang/security/injection
+runs:
+  using: composite
+  steps:
+    - name: Check out reviewed rules
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: semgrep/semgrep-rules
+        ref: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
+        path: .semgrep-rules
+        persist-credentials: false
+    - name: Scan source
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SEMGREP_RULES: ${{ inputs.rules }}
+      run: '"$ACTION_PATH/../scripts/semgrep"'

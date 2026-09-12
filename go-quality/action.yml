@@ -1,0 +1,20 @@
+name: Go quality
+description: Verify repository-owned Go lint and formatter configuration on Linux.
+inputs:
+  go-version-file:
+    description: Repository-relative Go version file.
+    default: go.mod
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+    - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+      with:
+        version: v2.12.2
+    - name: Verify configuration and formatting
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: '"$ACTION_PATH/../scripts/check-go-format"'

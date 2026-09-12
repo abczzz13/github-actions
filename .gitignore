@@ -1,0 +1,4 @@
+__pycache__/
+.venv/
+.bin/
+.semgrep-rules/

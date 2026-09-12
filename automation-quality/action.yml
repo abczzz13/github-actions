@@ -1,0 +1,27 @@
+name: Automation quality
+description: Install pinned tools and lint workflows and repository shell scripts on Linux AMD64.
+inputs:
+  shellcheck-excludes:
+    description: Comma-separated ShellCheck codes, justified in the caller repository.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: '1.26.6'
+        cache: false
+    - name: Install and run automation linters
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SHELLCHECK_EXCLUDES: ${{ inputs.shellcheck-excludes }}
+      run: '"$ACTION_PATH/../scripts/automation-quality"'
+    - name: Audit Actions security
+      uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+      with:
+        inputs: .
+        version: 1.29.0
+        persona: regular
+        advanced-security: false
+        annotations: true

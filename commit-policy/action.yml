@@ -1,0 +1,18 @@
+name: Commit policy
+description: Validate a PR title or the checked-out squash commit with the shared Commitizen version.
+inputs:
+  message:
+    description: Message to check; an empty value checks the checked-out commit instead.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.13'
+    - name: Check conventional commit
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        COMMIT_MESSAGE: ${{ inputs.message }}
+      run: '"$ACTION_PATH/../scripts/with-commitizen" check'

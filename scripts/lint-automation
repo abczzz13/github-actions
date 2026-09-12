@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command -v actionlint >/dev/null
+command -v shellcheck >/dev/null
+actionlint
+
+scripts=()
+while IFS= read -r -d '' path; do
+    [[ -f "$path" ]] || continue
+    # Only inspect shell sources, not vendored dependencies or generated trees.
+    case "$path" in vendor/*|.git/*) continue ;; esac
+    if [[ "$path" == *.sh ]] || head -n 1 "$path" | grep -qE '^#!.*(ba)?sh([[:space:]]|$)'; then
+        scripts+=("$path")
+    fi
+done < <(git ls-files --cached --others --exclude-standard -z)
+
+if ((${#scripts[@]})); then
+    options=()
+    if [[ -n "${SHELLCHECK_EXCLUDES:-}" ]]; then
+        options+=(--exclude="$SHELLCHECK_EXCLUDES")
+    fi
+    shellcheck "${options[@]}" "${scripts[@]}"
+fi

@@ -1,0 +1,9 @@
+version: '2'
+linters:
+  default: standard
+formatters:
+  enable: [gofumpt, gci]
+  settings:
+    gci:
+      sections: [standard, default, prefix(example.com/fixture)]
+      custom-order: true

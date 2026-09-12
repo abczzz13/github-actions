@@ -1,0 +1,15 @@
+name: Go security
+description: Check reachable Go vulnerabilities with a pinned govulncheck.
+inputs:
+  go-version-file:
+    description: Repository-relative Go version file.
+    default: go.mod
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+    - name: Check Go vulnerabilities
+      shell: bash
+      run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

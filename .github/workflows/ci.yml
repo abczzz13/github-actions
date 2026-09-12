@@ -1,0 +1,53 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  automation:
+    name: Automation quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./automation-quality
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Test shared action contracts and releases against local Git remotes
+        run: |
+          python -m pip install -r scripts/commitizen-requirements.txt PyYAML==6.0.3
+          python -m unittest discover -s tests -v
+  consumers:
+    name: Go quality (${{ matrix.formatter }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        formatter: [goimports, gci]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare consuming repository fixture
+        env:
+          FORMATTER: ${{ matrix.formatter }}
+        run: cp -R "tests/fixtures/$FORMATTER/." .
+      - uses: ./go-quality
+      - name: Prove unformatted code fails without rewriting it
+        run: |
+          printf 'package fixture\nfunc  Value()int{return 1}\n' > fixture.go
+          cp fixture.go "$RUNNER_TEMP/unformatted.go"
+          if ./scripts/check-go-format; then
+            echo 'Formatting check accepted unformatted code' >&2
+            exit 1
+          fi
+          cmp fixture.go "$RUNNER_TEMP/unformatted.go"

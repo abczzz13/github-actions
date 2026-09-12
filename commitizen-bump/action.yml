@@ -1,0 +1,44 @@
+name: Commitizen bump
+description: Atomically publish a version commit and tag from a validated main revision.
+inputs:
+  token:
+    description: Caller GITHUB_TOKEN with contents write, used only for Git transport.
+    required: true
+  validated-sha:
+    description: Full SHA validated by the caller's successful main CI.
+    required: true
+  branch:
+    description: Release branch; the checkout must be at the validated revision.
+    default: main
+  initial-version:
+    description: Explicit first version, only when no semantic version tags exist. Must match .cz.toml.
+    default: ""
+outputs:
+  created:
+    description: Whether this invocation created and pushed a release.
+    value: ${{ steps.bump.outputs.created }}
+  version:
+    description: Created semantic version, or empty on no-op.
+    value: ${{ steps.bump.outputs.version }}
+  tag:
+    description: Created unprefixed tag, or empty on no-op.
+    value: ${{ steps.bump.outputs.tag }}
+  sha:
+    description: Exact created tag commit SHA, or empty on no-op.
+    value: ${{ steps.bump.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.13'
+    - name: Create version
+      id: bump
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        RELEASE_TOKEN: ${{ inputs.token }}
+        VALIDATED_SHA: ${{ inputs.validated-sha }}
+        RELEASE_BRANCH: ${{ inputs.branch }}
+        INITIAL_VERSION: ${{ inputs.initial-version }}
+      run: '"$ACTION_PATH/../scripts/with-commitizen" bump'
