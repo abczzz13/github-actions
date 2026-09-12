@@ -105,7 +105,7 @@ def main():
     if sys.argv[1:] != ["bump"]:
         raise ValueError("usage: commitizen_release.py check|bump")
 
-    token = os.environ["RELEASE_TOKEN"]
+    token = os.environ.pop("RELEASE_TOKEN")
     if not token:
         raise ValueError("release token is required")
     transport_env = os.environ.copy()

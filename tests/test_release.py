@@ -143,6 +143,25 @@ class ReleaseTests(unittest.TestCase):
                 release.create_release(sha, "main")
         self.assertEqual(release.git("ls-remote", "origin", "refs/tags/1.3.0"), "")
 
+    def test_main_limits_token_to_transport_environment(self):
+        environment = {
+            "RELEASE_TOKEN": "test-only-token",
+            "VALIDATED_SHA": "a" * 40,
+            "RELEASE_BRANCH": "main",
+            "GITHUB_OUTPUT": str(self.root / "output"),
+            "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
+        }
+        with mock.patch.dict(os.environ, environment):
+            with mock.patch.object(release.sys, "argv", ["script", "bump"]):
+                with mock.patch.object(release, "create_release", return_value=None) as create:
+                    self.assertEqual(release.main(), 0)
+                    self.assertNotIn("RELEASE_TOKEN", os.environ)
+                    transport = create.call_args.args[3]
+                    self.assertNotIn("RELEASE_TOKEN", transport)
+                    self.assertEqual(transport["GIT_CONFIG_KEY_0"], "http.https://github.com/.extraheader")
+                    self.assertTrue(transport["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: basic "))
+        self.assertEqual((self.root / "output").read_text(), "created=false\nversion=\ntag=\nsha=\n")
+
     def test_rerun_of_validated_revision_does_not_bump_twice(self):
         self.baseline()
         sha = self.commit("fix: candidate")
