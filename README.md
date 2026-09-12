@@ -2,7 +2,9 @@
 
 Small, versioned CI building blocks for `abczzz13/wbso-backend` and
 `abczzz13/forklog-backend`. Consumers pin a full commit SHA, not `main` or a
-moving version tag. Dependabot proposes adoption of updates independently.
+moving version tag, with the version as a trailing comment. Dependabot
+discovers newer versions through this repository's semantic tags and proposes
+updated SHAs independently.
 
 ## Actions
 
@@ -28,8 +30,8 @@ steps:
   - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       persist-credentials: false
-  - uses: abczzz13/github-actions/go-quality@REVIEWED_COMMIT_SHA
-  - uses: abczzz13/github-actions/semgrep@REVIEWED_COMMIT_SHA
+  - uses: abczzz13/github-actions/go-quality@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+  - uses: abczzz13/github-actions/semgrep@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
     with:
       # Extend the defaults, for example with JWT rules for a service that issues tokens.
       rules: |
@@ -82,6 +84,30 @@ at leisure; existing projects do not pass it. The action never pushes local
 intermediate state if Commitizen fails; recovery after a successful push but
 failed artifact publication uses the created tag.
 
+## Releasing this repository
+
+This repository releases itself with its own `commitizen-bump` action: the
+`release` job in `.github/workflows/ci.yml` runs after the CI jobs on every
+`main` push, following the rules above. Without a breaking marker, `fix:`,
+`refactor:`, and `perf:` commits produce a patch tag; `feat:` produces a minor
+tag. Other types (such as `docs:`, `test:`, and `chore:`) are a no-op. A `!`
+marker (for example, `feat!:` or `refactor!:`) or a `BREAKING CHANGE:` footer
+produces a major tag, including while the version is `0.x`.
+
+This repository deliberately requires a major release for **any** change to an
+action's inputs, outputs, or documented contract, including backward-compatible
+additions. This is stricter than SemVer; mark those commits accordingly. CI
+checks PR titles with `commit-policy`, including when titles are edited. Use the
+validated title as the squash commit title; reviewers must still verify that
+the selected increment matches the change.
+
+The tag points at the bump commit, which changes only `.cz.toml` and
+`CHANGELOG.md` on top of the CI-validated commit. Tests enforce this with the
+repository's actual release configuration. Consumer actions do not read this
+action repository's release metadata; `commitizen-bump` reads the caller's
+`.cz.toml`. The action implementation is therefore unchanged by the bump.
+Consumers pin the SHA of a tag, never `main`.
+
 ## Maintenance and validation
 
 Tool versions are owned here. Dependabot covers the pins in the first group; the
@@ -128,5 +154,6 @@ git diff --check
 
 Review action input/output changes as public API changes. Test consumers before
 updating their pins. Repository settings should allow squash merges only, use
-read-only workflow tokens, and disallow Actions approval of PRs. Enable required
-checks/reviews where the repository's GitHub plan supports them.
+PR titles as the default squash commit titles, read-only workflow tokens, and
+disallow Actions approval of PRs. Enable required checks/reviews where the
+repository's GitHub plan supports them.

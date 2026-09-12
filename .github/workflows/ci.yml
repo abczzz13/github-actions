@@ -1,14 +1,18 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Manual runs must not replace pending main-push runs that can release.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Protect running main releases; newer runs can still replace pending runs.
+  # Only superseded PR runs are cancelled while running.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   automation:
     name: Automation quality
@@ -18,6 +22,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check PR title for squash-merge versioning
+        if: github.event_name == 'pull_request'
+        uses: ./commit-policy
+        with:
+          message: ${{ github.event.pull_request.title }}
       - uses: ./automation-quality
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -52,3 +61,25 @@ jobs:
             exit 1
           fi
           cmp fixture.go "$RUNNER_TEMP/unformatted.go"
+  release:
+    name: Tag release
+    # Same-workflow gating on the CI jobs above satisfies the release rules in
+    # the README without workflow_run identity checks.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [automation, consumers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./commitizen-bump
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          validated-sha: ${{ github.sha }}

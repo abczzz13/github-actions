@@ -38,6 +38,24 @@ class ActionTests(unittest.TestCase):
                             shell.flush()
                             subprocess.run(["shellcheck", "--shell=bash", shell.name], check=True)
 
+    def test_ci_separates_events_and_checks_pr_titles(self):
+        # BaseLoader preserves GitHub's "on" key rather than YAML 1.1's boolean.
+        workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+        self.assertIn("${{ github.event_name }}", workflow["concurrency"]["group"])
+        self.assertEqual(
+            workflow["concurrency"]["cancel-in-progress"],
+            "${{ github.event_name == 'pull_request' }}",
+        )
+        self.assertTrue(
+            {"opened", "synchronize", "reopened", "edited"}
+            <= set(workflow["on"]["pull_request"]["types"])
+        )
+        steps = workflow["jobs"]["automation"]["steps"]
+        policy = next(step for step in steps if step.get("uses") == "./commit-policy")
+        self.assertEqual(policy["if"], "github.event_name == 'pull_request'")
+        self.assertEqual(policy["with"]["message"], "${{ github.event.pull_request.title }}")
+        self.assertIn("automation", workflow["jobs"]["release"]["needs"])
+
     def test_go_quality_fails_on_diff_even_when_formatter_returns_zero(self):
         for output, exit_code, expected in [("", 0, 0), ("formatting diff", 0, 1), ("", 2, 1)]:
             with self.subTest(output=output, exit_code=exit_code):

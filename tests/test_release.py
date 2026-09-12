@@ -7,7 +7,8 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/commitizen_release.py"
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/commitizen_release.py"
 SPEC = importlib.util.spec_from_file_location("release", SCRIPT)
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
@@ -56,7 +57,13 @@ class ReleaseTests(unittest.TestCase):
             ("fix: repair request validation", "1.2.4"),
             ("feat: add recipes", "1.3.0"),
             ("feat!: remove legacy endpoint", "2.0.0"),
+            ("refactor!: change the public contract", "2.0.0"),
+            ("refactor: change the public contract\n\nBREAKING CHANGE: remove an input", "2.0.0"),
+            ("refactor: simplify internals", "1.2.4"),
+            ("perf: reduce allocations", "1.2.4"),
             ("docs: explain configuration", None),
+            ("test: cover shared action", None),
+            ("chore: update repository settings", None),
         ]
         # Separate repositories keep tags and changelog state isolated per case.
         for index, (message, expected) in enumerate(cases):
@@ -81,6 +88,38 @@ class ReleaseTests(unittest.TestCase):
                     remote = release.git("ls-remote", "origin", f"refs/tags/{expected}")
                     self.assertEqual(remote, f"{head}\trefs/tags/{expected}")
                     self.assertIn(expected, Path("CHANGELOG.md").read_text())
+
+    def test_repository_config_releases_only_metadata(self):
+        Path(".cz.toml").write_text((ROOT / ".cz.toml").read_text())
+        previous = release.configured_version()
+        major, minor, patch = map(int, previous.split("."))
+        self.commit("feat: establish shared actions")
+        release.git("tag", previous)
+        release.git("push", "--tags", "origin", "HEAD:main")
+
+        # Exercise both changelog creation and updates, and preserve the policy
+        # that breaking markers produce a major release even from 0.x.
+        for message, expected in [
+            ("fix: repair shared action", f"{major}.{minor}.{patch + 1}"),
+            ("refactor!: change action contract", f"{major + 1}.0.0"),
+        ]:
+            with self.subTest(message=message):
+                validated = self.commit(message)
+                release.git("push", "origin", "HEAD:main")
+                result = release.create_release(validated, "main")
+                self.assertIsNotNone(result)
+                self.assertEqual(result["version"], expected)
+                self.assertEqual(release.configured_version(), expected)
+                self.assertEqual(release.git("rev-parse", "HEAD^"), validated)
+                self.assertEqual(
+                    release.git("diff", "--name-only", validated, result["sha"]).splitlines(),
+                    [".cz.toml", "CHANGELOG.md"],
+                )
+                self.assertEqual(
+                    release.git("ls-remote", "origin", f"refs/tags/{expected}"),
+                    f"{result['sha']}\trefs/tags/{expected}",
+                )
+                self.assertEqual(release.git("status", "--porcelain"), "")
 
     def test_bootstrap_uses_explicit_version_not_historical_increment(self):
         self.baseline("0.1.0", tag=False)
