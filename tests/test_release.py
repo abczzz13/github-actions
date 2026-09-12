@@ -35,11 +35,11 @@ class ReleaseTests(unittest.TestCase):
         release.git("config", "user.email", "test@example.invalid")
         release.git("remote", "add", "origin", str(self.remote))
 
-    def baseline(self, version="1.2.3", tag=True):
+    def baseline(self, version="1.2.3", tag=True, extra_config=""):
         Path(".cz.toml").write_text(
             '[tool.commitizen]\nname = "cz_conventional_commits"\n'
             'tag_format = "$version"\nversion_scheme = "semver"\n'
-            f'version = "{version}"\nupdate_changelog_on_bump = true\n'
+            f'version = "{version}"\nupdate_changelog_on_bump = true\n{extra_config}'
         )
         self.commit("feat!: historical breaking change")
         if tag:
@@ -90,10 +90,41 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(release.configured_version(), "0.1.0")
         self.assertEqual(release.git("tag", "--list"), "0.1.0")
 
-    def test_missing_tag_requires_explicit_bootstrap(self):
+    def test_bootstrap_honours_configured_changelog_file(self):
+        self.baseline("0.1.0", tag=False, extra_config='changelog_file = "HISTORY.md"\n')
+        sha = release.git("rev-parse", "HEAD")
+        self.assertEqual(release.create_release(sha, "main", "0.1.0")["version"], "0.1.0")
+        self.assertIn("0.1.0", Path("HISTORY.md").read_text())
+        self.assertFalse(Path("CHANGELOG.md").exists())
+        self.assertEqual(release.git("status", "--porcelain", "--untracked-files=all"), "")
+
+    def test_missing_tag_requires_explicit_matching_bootstrap(self):
         self.baseline("0.1.0", tag=False)
-        with self.assertRaisesRegex(ValueError, "bootstrap"):
-            release.create_release(release.git("rev-parse", "HEAD"), "main")
+        sha = release.git("rev-parse", "HEAD")
+        for initial_version in ["", "0.2.0"]:
+            with self.subTest(initial_version=initial_version):
+                with self.assertRaisesRegex(ValueError, "bootstrap"):
+                    release.create_release(sha, "main", initial_version)
+        self.assertEqual(release.git("tag", "--list"), "")
+
+    def test_initial_version_is_ignored_once_the_tag_exists(self):
+        self.baseline()
+        sha = self.commit("fix: candidate")
+        release.git("push", "origin", "HEAD:main")
+        self.assertEqual(release.create_release(sha, "main", "1.2.3")["version"], "1.2.4")
+
+    def test_configured_version_rejects_unsupported_configuration(self):
+        cases = [
+            ('tag_format = "v$version"\nversion_scheme = "semver"\nversion = "1.2.3"\n', "unprefixed"),
+            ('tag_format = "$version"\nversion_scheme = "pep440"\nversion = "1.2.3"\n', "semver"),
+            ('tag_format = "$version"\nversion_scheme = "semver"\nversion = "1.2.3-rc.1"\n', "stable"),
+            ('tag_format = "$version"\nversion_scheme = "semver"\nversion = "v1.2.3"\n', "stable"),
+        ]
+        for config, expected in cases:
+            with self.subTest(config=config):
+                Path(".cz.toml").write_text(f"[tool.commitizen]\n{config}")
+                with self.assertRaisesRegex(ValueError, expected):
+                    release.configured_version()
 
     def test_refuses_dirty_or_unvalidated_source(self):
         self.baseline()

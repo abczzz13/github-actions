@@ -2,6 +2,7 @@
 set -euo pipefail
 
 golangci-lint config verify
+golangci-lint run
 diff_file=$(mktemp)
 trap 'rm -f "$diff_file"' EXIT
 # Do not rely on fmt's exit status: some versions print a diff and exit zero.

@@ -4,8 +4,9 @@ set -euo pipefail
 script_directory=$(cd -- "$(dirname "$0")" && pwd)
 environment=$(mktemp -d "${RUNNER_TEMP:-/tmp}/commitizen.XXXXXX")
 trap 'rm -rf "$environment"' EXIT
-# Installation does not need the caller's write credential.
-env -u RELEASE_TOKEN python -m venv "$environment"
+# Installation does not need the caller's write credential. Every package,
+# transitive ones included, must match the hashes in the lock file.
+env -u RELEASE_TOKEN python3 -m venv "$environment"
 env -u RELEASE_TOKEN "$environment/bin/python" -m pip install --disable-pip-version-check --quiet \
-    -r "$script_directory/commitizen-requirements.txt"
+    --require-hashes -r "$script_directory/commitizen-requirements.txt"
 "$environment/bin/python" "$script_directory/commitizen_release.py" "$@"

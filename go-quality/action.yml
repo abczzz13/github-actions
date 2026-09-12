@@ -13,8 +13,9 @@ runs:
     - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
         version: v2.12.2
-    - name: Verify configuration and formatting
+        install-only: true
+    - name: Verify configuration, lint, and check formatting
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: '"$ACTION_PATH/../scripts/check-go-format"'
+      run: '"$ACTION_PATH/../scripts/go-quality"'

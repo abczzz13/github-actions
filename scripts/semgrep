@@ -17,6 +17,6 @@ fi
 
 docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
     --volume "$PWD:/src:ro" --workdir /src \
-    docker.io/returntocorp/semgrep:1.170.0@sha256:c98f8829eea377274ee4b10656458b078b88232469b2ff913f091c2317347c9d \
+    docker.io/semgrep/semgrep:1.170.0@sha256:c98f8829eea377274ee4b10656458b078b88232469b2ff913f091c2317347c9d \
     semgrep scan --error --metrics off --disable-version-check \
     --exclude .semgrep-rules --exclude vendor "${rules[@]}" .

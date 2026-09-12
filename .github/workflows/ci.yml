@@ -23,8 +23,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Test shared action contracts and releases against local Git remotes
+        # Uses the pinned ShellCheck that automation-quality placed on PATH.
         run: |
-          python -m pip install -r scripts/commitizen-requirements.txt PyYAML==6.0.3
+          python -m pip install --require-hashes -r scripts/commitizen-requirements.txt -r tests/requirements.txt
           python -m unittest discover -s tests -v
   consumers:
     name: Go quality (${{ matrix.formatter }})
@@ -46,8 +47,8 @@ jobs:
         run: |
           printf 'package fixture\nfunc  Value()int{return 1}\n' > fixture.go
           cp fixture.go "$RUNNER_TEMP/unformatted.go"
-          if ./scripts/check-go-format; then
-            echo 'Formatting check accepted unformatted code' >&2
+          if ./scripts/go-quality; then
+            echo 'Quality check accepted unformatted code' >&2
             exit 1
           fi
           cmp fixture.go "$RUNNER_TEMP/unformatted.go"

@@ -1,4 +1,4 @@
-"""Shared Commitizen policy and atomic release creation (Python standard library)."""
+"""Shared Commitizen policy and atomic release creation, run inside the pinned Commitizen environment."""
 
 import base64
 import os
@@ -7,6 +7,8 @@ import re
 import subprocess
 import sys
 import tomllib
+
+from commitizen.exceptions import ExitCode
 
 
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -69,14 +71,16 @@ def create_release(validated_sha, branch, initial_version="", transport_env=None
     git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
     if bootstrap:
         # Commitizen intentionally refuses a bump from 0.1.0 to 0.1.0. Generate
-        # its initial changelog, then establish that explicit baseline tag.
-        cz("changelog", "--unreleased-version", initial_version, "--file-name", "CHANGELOG.md").check_returncode()
-        git("add", "CHANGELOG.md")
+        # its initial changelog (at the configured changelog_file), then
+        # establish that explicit baseline tag. The checkout was verified clean,
+        # so adding everything stages only what Commitizen wrote.
+        cz("changelog", "--unreleased-version", initial_version).check_returncode()
+        git("add", "--all")
         git("commit", "--allow-empty", "-m", f"bump: initial version {initial_version}")
         git("tag", initial_version)
     else:
         result = cz("bump", "--yes", "--changelog", "--check-consistency")
-        if result.returncode == 21:
+        if result.returncode == ExitCode.NO_INCREMENT:
             if git("status", "--porcelain") or git("rev-parse", "HEAD") != validated_sha:
                 raise ValueError("Commitizen reported no release but modified the checkout")
             print("No release-worthy commits; no version was created.")
@@ -105,11 +109,12 @@ def main():
     if sys.argv[1:] != ["bump"]:
         raise ValueError("usage: commitizen_release.py check|bump")
 
+    # Removing the token from this process keeps it out of every child except
+    # the Git transport calls, which receive it through transport_env only.
     token = os.environ.pop("RELEASE_TOKEN")
     if not token:
         raise ValueError("release token is required")
     transport_env = os.environ.copy()
-    transport_env.pop("RELEASE_TOKEN", None)
     authorization = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     transport_env.update({
         "GIT_CONFIG_COUNT": "1",
@@ -141,6 +146,6 @@ if __name__ == "__main__":
         if error.stderr:
             print(error.stderr, file=sys.stderr)
         sys.exit(1)
-    except (KeyError, ValueError) as error:
+    except (KeyError, OSError, ValueError) as error:
         print(f"Commitizen policy failed: {error}", file=sys.stderr)
         sys.exit(1)

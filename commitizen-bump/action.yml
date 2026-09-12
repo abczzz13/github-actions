@@ -11,7 +11,7 @@ inputs:
     description: Release branch; the checkout must be at the validated revision.
     default: main
   initial-version:
-    description: Explicit first version, only when no semantic version tags exist. Must match .cz.toml.
+    description: Explicit first version; must match .cz.toml. Used only while no semantic version tags exist and ignored, not rejected, afterwards.
     default: ""
 outputs:
   created:

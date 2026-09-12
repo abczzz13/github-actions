@@ -1,13 +1,21 @@
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
+from commitizen.exceptions import ExitCode
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def write_executable(path, body):
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 class ActionTests(unittest.TestCase):
@@ -30,23 +38,24 @@ class ActionTests(unittest.TestCase):
                             shell.flush()
                             subprocess.run(["shellcheck", "--shell=bash", shell.name], check=True)
 
-    def test_format_diff_fails_even_when_formatter_returns_zero(self):
+    def test_go_quality_fails_on_diff_even_when_formatter_returns_zero(self):
         for output, exit_code, expected in [("", 0, 0), ("formatting diff", 0, 1), ("", 2, 1)]:
             with self.subTest(output=output, exit_code=exit_code):
                 with tempfile.TemporaryDirectory() as directory:
-                    executable = Path(directory) / "golangci-lint"
-                    executable.write_text(
-                        '#!/bin/sh\nif [ "$1" = config ]; then exit 0; fi\n'
-                        f"printf '%s' '{output}'\nexit {exit_code}\n"
+                    write_executable(
+                        Path(directory) / "golangci-lint",
+                        f'if [ "$1" != fmt ]; then exit 0; fi\nprintf \'%s\' \'{output}\'\nexit {exit_code}',
                     )
-                    executable.chmod(0o755)
                     env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}"}
-                    result = subprocess.run([str(ROOT / "scripts/check-go-format")], env=env)
+                    result = subprocess.run([str(ROOT / "scripts/go-quality")], env=env)
                     self.assertEqual(result.returncode, expected)
 
-    def test_commitizen_has_one_shared_pin(self):
-        requirements = (ROOT / "scripts/commitizen-requirements.txt").read_text()
-        self.assertRegex(requirements, r"\Acommitizen==[0-9]+\.[0-9]+\.[0-9]+\n\Z")
+    def test_commitizen_has_one_shared_hash_pinned_definition(self):
+        source = (ROOT / "scripts/commitizen-requirements.in").read_text()
+        self.assertRegex(source, r"\Acommitizen==[0-9]+\.[0-9]+\.[0-9]+\n\Z")
+        lock = (ROOT / "scripts/commitizen-requirements.txt").read_text()
+        self.assertIn(source.strip() + " \\\n    --hash=sha256:", lock)
+        self.assertIn("--require-hashes", (ROOT / "scripts/with-commitizen").read_text())
         for action in ["commit-policy", "commitizen-bump"]:
             with self.subTest(action=action):
                 text = (ROOT / action / "action.yml").read_text()
@@ -57,14 +66,75 @@ class ActionTests(unittest.TestCase):
         for message, expected in [
             ("feat: add sharing", 0),
             ("fix: reject $(touch /tmp/commit-policy-injection)", 0),
-            ("invalid title", 14),
+            ("invalid title", ExitCode.INVALID_COMMIT_MSG),
         ]:
             with self.subTest(message=message):
                 result = subprocess.run(
-                    [os.sys.executable, str(ROOT / "scripts/commitizen_release.py"), "check"],
+                    [sys.executable, str(ROOT / "scripts/commitizen_release.py"), "check"],
                     env=os.environ | {"COMMIT_MESSAGE": message}, capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def run_semgrep(self, directory, rules):
+        # A fake docker records its arguments instead of running the scanner.
+        log = Path(directory) / "docker.log"
+        log.unlink(missing_ok=True)
+        write_executable(Path(directory) / "docker", f'printf \'%s\\n\' "$@" > "{log}"')
+        env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}"}
+        if rules is not None:
+            env["SEMGREP_RULES"] = rules
+        else:
+            env.pop("SEMGREP_RULES", None)
+        result = subprocess.run([str(ROOT / "scripts/semgrep")], env=env, capture_output=True, text=True)
+        return result, log.read_text().splitlines() if log.exists() else []
+
+    def test_semgrep_only_mounts_relative_rule_paths_from_pinned_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, arguments = self.run_semgrep(directory, "go/lang/security/injection\n\ngo/jwt-go\n")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                [arguments[index + 1] for index, argument in enumerate(arguments) if argument == "--config"],
+                ["/src/.semgrep-rules/go/lang/security/injection", "/src/.semgrep-rules/go/jwt-go"],
+            )
+            self.assertIn(f"{Path.cwd()}:/src:ro", arguments)
+            for rules in [None, "", " \n", "/etc/passwd", "../outside", "go/lang;id", "go lang", "$HOME"]:
+                with self.subTest(rules=rules):
+                    result, arguments = self.run_semgrep(directory, rules)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(arguments, [], "docker must not run for rejected rules")
+
+    def test_lint_automation_selects_supported_shell_sources_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+            files = {
+                "suffix.sh": "echo suffix",
+                "bash-shebang": "#!/usr/bin/env bash\necho bash",
+                "sh-shebang": "#!/bin/sh\necho sh",
+                "dash-shebang": "#!/usr/bin/dash\necho dash",
+                "fish-shebang": "#!/usr/bin/fish\necho fish",
+                "zsh-shebang": "#!/bin/zsh\necho zsh",
+                "python-shebang": "#!/usr/bin/env python3\nprint()",
+                "README.md": "# not a script",
+                ".semgrep-rules/rule.sh": "echo reserved rule checkout",
+                "vendor/module.sh": "echo vendored",
+            }
+            for name, content in files.items():
+                path = repository / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content + "\n")
+            tools = Path(directory) / "tools"
+            tools.mkdir()
+            log = Path(directory) / "shellcheck.log"
+            write_executable(tools / "actionlint", "exit 0")
+            write_executable(tools / "shellcheck", f'printf \'%s\\n\' "$@" > "{log}"')
+            env = os.environ | {"PATH": f"{tools}:{os.environ['PATH']}", "SHELLCHECK_EXCLUDES": "SC2034,SC2154"}
+            subprocess.run([str(ROOT / "scripts/lint-automation")], cwd=repository, env=env, check=True)
+            self.assertEqual(
+                sorted(log.read_text().splitlines()),
+                ["--exclude=SC2034,SC2154", "bash-shebang", "dash-shebang", "sh-shebang", "suffix.sh"],
+            )
 
 
 if __name__ == "__main__":
