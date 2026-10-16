@@ -16,7 +16,7 @@ read-only `contents` permissions unless a job publishes.
 
 | Path | Contract |
 | --- | --- |
-| `go-quality` | Uses `go.mod` (override `go-version-file`), sets up Go and pinned golangci-lint, then verifies the lint configuration, lints, and rejects formatter diffs without modifying files. The caller owns `.golangci.yml`, build tags, and formatter choice. Restores the newest Go build, module and lint caches on every run; only default-branch runs save them, one entry per commit. |
+| `go-quality` | Uses `go.mod` (override `go-version-file`), sets up Go and pinned golangci-lint, then verifies the lint configuration, lints, and rejects formatter diffs without modifying files. The caller owns `.golangci.yml`, build tags, and formatter choice. |
 | `automation-quality` | Installs checksum-verified Actionlint and ShellCheck, checks workflows and tracked/untracked non-ignored shell scripts (sh, bash, dash; `vendor/` and `.semgrep-rules/` skipped), and runs Zizmor. Both tools stay on `PATH` for later steps of the same job. Optional `shellcheck-excludes` must be justified by the caller. No Go toolchain is installed or changed. |
 | `go-security` | Sets up Go from `go.mod` (override `go-version-file`) and runs pinned govulncheck over `./...`. |
 | `semgrep` | Uses pinned scanner and rules. `rules` is a newline-separated list of relative paths within the rule checkout; defaults to Go injection/deserialization. Ignores vendor and the rule checkout. Reserves `.semgrep-rules/` in the caller workspace; add it to the caller's `.gitignore`. |
@@ -110,6 +110,24 @@ Consumers pin the SHA of a tag, never `main`.
 
 ## Maintenance and validation
 
+### Go-quality caching internals
+
+Caching is a best-effort optimization; its layout and keys are implementation
+details, not part of the action's public contract. Every run attempts to restore
+available caches. Module downloads are cached separately by the configured Go
+version file and workspace `go.sum` files, avoiding a full module-cache upload
+on each source commit. Build and lint analysis caches use per-commit keys.
+
+Restores prefer an exact key, then the newest entry matching each fallback
+prefix in order; this is not necessarily the newest cache overall. Only
+successful default-branch runs save missing entries, and exact hits are not
+uploaded again. PRs restore caches but do not save them. Build and analysis
+caches are content-addressed, so older entries remain safe to reuse. Validate
+archive sizes and total restore/lint/save time in real consumers before
+updating their pins; local tests do not measure GitHub's cache service.
+
+### Tool pins
+
 Tool versions are owned here. Dependabot covers the pins in the first group; the
 second group is reviewed manually, so check each entry when bumping anything nearby.
 
@@ -135,7 +153,8 @@ installation uses `--require-hashes`, so an unlocked or tampered package fails.
 
 CI tests release calculation, first-version bootstrap (including the configured
 changelog file), no-op behavior, stale source, reruns, and atomic-push races
-against temporary local Git remotes; Semgrep rule-path validation and
+against temporary local Git remotes; Go-quality cache keys, save guards, and
+path discovery (including environment overrides); Semgrep rule-path validation and
 automation-lint file selection against fake `docker`/`shellcheck` executables;
 and actual Go-quality consumer fixtures for goimports and gci, including a
 negative, non-mutating formatting test. Composite shell snippets are explicitly
