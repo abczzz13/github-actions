@@ -1,3 +1,9 @@
+## 1.0.0 (2026-10-16)
+
+### Refactor
+
+- clarify release validation and harden cache saves (#11)
+
 ## 0.3.1 (2026-10-16)
 
 ### Fix
