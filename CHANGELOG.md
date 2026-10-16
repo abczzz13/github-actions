@@ -1,3 +1,14 @@
+## 0.3.1 (2026-10-16)
+
+### Fix
+
+- **deps**: bump zizmorcore/zizmor-action from 0.6.3 to 0.6.4 in /automation-quality in the actions group across 1 directory (#9)
+- **deps**: bump commitizen from 4.19.0 to 4.19.1 in /scripts (#8)
+
+### Perf
+
+- **go-quality**: keep build and lint caches current (#10)
+
 ## 0.3.0 (2026-10-07)
 
 ### Fix
