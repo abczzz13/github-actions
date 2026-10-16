@@ -62,8 +62,14 @@ The caller **must**:
    `cancel-in-progress: false`.
 3. Check out the validated SHA with full history and no persisted credentials.
 4. Grant only the bump job `contents: write`, using the caller's `GITHUB_TOKEN`.
-5. Resolve and validate the exact tag SHA after the bump, then build/verify the
-   project's artifacts before publishing. A bump changes the source SHA.
+5. Resolve the exact tag SHA after the bump, then build/verify the project's
+   artifacts before publishing. A bump changes the source SHA, so either
+   validate the tag SHA again or prove it equivalent to `validated-sha`: its
+   only parent is `validated-sha` and it changes only files the caller's CI
+   ignores and nothing it runs reads (typically `.cz.toml` and the changelog).
+   Fail closed if that proof does not hold. A version file the build reads
+   (Commitizen `version_files`) rules out the proof. Manual recovery has no
+   `validated-sha`, so it always validates the tag.
 6. Keep publication in the same workflow: pushes by `GITHUB_TOKEN` do not trigger
    another tag-push workflow. A manual recovery selects an existing tag and must
    validate it again, not invoke another bump or overwrite published artifacts.
