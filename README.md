@@ -63,13 +63,20 @@ The caller **must**:
 3. Check out the validated SHA with full history and no persisted credentials.
 4. Grant only the bump job `contents: write`, using the caller's `GITHUB_TOKEN`.
 5. Resolve the exact tag SHA after the bump, then build/verify the project's
-   artifacts before publishing. A bump changes the source SHA, so either
-   validate the tag SHA again or prove it equivalent to `validated-sha`: its
-   only parent is `validated-sha` and it changes only files the caller's CI
-   ignores and nothing it runs reads (typically `.cz.toml` and the changelog).
-   Fail closed if that proof does not hold. A version file the build reads
-   (Commitizen `version_files`) rules out the proof. Manual recovery has no
-   `validated-sha`, so it always validates the tag.
+   artifacts from that SHA before publishing. A bump changes the source SHA.
+   Either validate the tag SHA again or prove that each check being skipped
+   remains equivalent to its result at `validated-sha`:
+   - The tag commit's only parent is `validated-sha`.
+   - Every changed path is explicitly allowed and is read by neither the
+     skipped checks nor the artifact build (typically `.cz.toml` and the
+     changelog). Workflow `paths-ignore` filters are not evidence of this:
+     tooling may still read those files.
+   - Skipped checks do not depend on changed Git metadata, including commit
+     IDs/timestamps, tags, `git describe`, or VCS-stamped version data.
+
+   Fail closed: if any condition is uncertain, validate the tag again. A
+   version file the build reads (Commitizen `version_files`) rules out the
+   proof. Manual recovery has no `validated-sha`, so it always validates the tag.
 6. Keep publication in the same workflow: pushes by `GITHUB_TOKEN` do not trigger
    another tag-push workflow. A manual recovery selects an existing tag and must
    validate it again, not invoke another bump or overwrite published artifacts.
@@ -126,11 +133,24 @@ on each source commit. Build and lint analysis caches use per-commit keys.
 
 Restores prefer an exact key, then the newest entry matching each fallback
 prefix in order; this is not necessarily the newest cache overall. Only
-successful default-branch runs save missing entries, and exact hits are not
-uploaded again. PRs restore caches but do not save them. Build and analysis
-caches are content-addressed, so older entries remain safe to reuse. Validate
-archive sizes and total restore/lint/save time in real consumers before
-updating their pins; local tests do not measure GitHub's cache service.
+successful non-PR default-branch quality checks save missing entries, and
+exact hits are not uploaded again. Both `pull_request` and
+`pull_request_target` runs restore caches but do not save them, even though
+`pull_request_target` uses the base branch ref. Callers remain responsible for
+checking out trusted source in other default-branch workflows. Build and
+analysis caches are content-addressed, so older entries remain safe to reuse.
+
+Before updating consumer pins, validate caching in real GitHub Actions runs:
+
+- Exercise a cold cache, an exact-hit rerun, and a later commit using fallback
+  caches. Confirm PR runs restore without saving.
+- Record module and build/analysis archive sizes and total restore/lint/save
+  time, comparing against the consumer's current pin.
+- Check repository cache usage and eviction pressure from per-commit entries.
+  Do not roll out without confirming an end-to-end benefit.
+
+Local tests check configuration and guards, not GitHub's cache service or
+performance.
 
 ### Tool pins
 
