@@ -110,12 +110,30 @@ Consumers pin the SHA of a tag, never `main`.
 
 ## Maintenance and validation
 
+### Go-quality caching internals
+
+Caching is a best-effort optimization; its layout and keys are implementation
+details, not part of the action's public contract. Every run attempts to restore
+available caches. Module downloads are cached separately by the configured Go
+version file and workspace `go.sum` files, avoiding a full module-cache upload
+on each source commit. Build and lint analysis caches use per-commit keys.
+
+Restores prefer an exact key, then the newest entry matching each fallback
+prefix in order; this is not necessarily the newest cache overall. Only
+successful default-branch runs save missing entries, and exact hits are not
+uploaded again. PRs restore caches but do not save them. Build and analysis
+caches are content-addressed, so older entries remain safe to reuse. Validate
+archive sizes and total restore/lint/save time in real consumers before
+updating their pins; local tests do not measure GitHub's cache service.
+
+### Tool pins
+
 Tool versions are owned here. Dependabot covers the pins in the first group; the
 second group is reviewed manually, so check each entry when bumping anything nearby.
 
 | Pin | Location | Updated by |
 | --- | --- | --- |
-| `actions/*`, `golangci-lint-action`, `zizmor-action` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
+| `actions/*` (including `actions/cache`), `golangci-lint-action`, `zizmor-action` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
 | Commitizen and its transitive dependencies | `scripts/commitizen-requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | Test dependencies | `tests/requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | golangci-lint engine | `go-quality/action.yml` (`version`) | manual; [releases](https://github.com/golangci/golangci-lint/releases) |
@@ -135,7 +153,8 @@ installation uses `--require-hashes`, so an unlocked or tampered package fails.
 
 CI tests release calculation, first-version bootstrap (including the configured
 changelog file), no-op behavior, stale source, reruns, and atomic-push races
-against temporary local Git remotes; Semgrep rule-path validation and
+against temporary local Git remotes; Go-quality cache keys, save guards, and
+path discovery (including environment overrides); Semgrep rule-path validation and
 automation-lint file selection against fake `docker`/`shellcheck` executables;
 and actual Go-quality consumer fixtures for goimports and gci, including a
 negative, non-mutating formatting test. Composite shell snippets are explicitly

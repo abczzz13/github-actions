@@ -7,15 +7,70 @@ inputs:
 runs:
   using: composite
   steps:
+    # Manage caches explicitly: dependency-keyed modules stay reusable while
+    # per-commit build and analysis entries keep up with source changes.
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ inputs.go-version-file }}
+        cache: false
+    - name: Locate caches
+      id: cache-paths
+      shell: bash
+      run: |
+        { echo "go-build=$(go env GOCACHE)"; echo "go-mod=$(go env GOMODCACHE)"; } >> "$GITHUB_OUTPUT"
+        echo "golangci-lint=${GOLANGCI_LINT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/golangci-lint}" >> "$GITHUB_OUTPUT"
+    # Avoid uploading unchanged downloaded modules with every source commit.
+    - name: Restore module cache
+      id: modules-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.cache-paths.outputs.go-mod }}
+        key: go-quality-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file, '**/go.sum') }}
+        restore-keys: |
+          go-quality-modules-${{ runner.os }}-${{ runner.arch }}-
+    # Prefer an exact commit match, then the newest entry with the same version
+    # file, then the newest OS/architecture match. Build and analysis caches are
+    # content-addressed, so restoring an older entry is safe.
+    - name: Restore build and analysis caches
+      id: analysis-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.cache-paths.outputs.go-build }}
+          ${{ steps.cache-paths.outputs.golangci-lint }}
+        key: go-quality-analysis-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file) }}-${{ github.sha }}
+        restore-keys: |
+          go-quality-analysis-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file) }}-
+          go-quality-analysis-${{ runner.os }}-${{ runner.arch }}-
     - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
         version: v2.14.0
         install-only: true
+        skip-cache: true
     - name: Verify configuration, lint, and check formatting
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
       run: '"$ACTION_PATH/../scripts/go-quality"'
+    # Only successful default-branch runs save; PRs cannot add cache entries.
+    # Exact hits are immutable, so skip redundant uploads on reruns.
+    - name: Save module cache
+      if: >-
+        success() &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        steps.modules-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.cache-paths.outputs.go-mod }}
+        key: ${{ steps.modules-cache.outputs.cache-primary-key }}
+    - name: Save build and analysis caches
+      if: >-
+        success() &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        steps.analysis-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.cache-paths.outputs.go-build }}
+          ${{ steps.cache-paths.outputs.golangci-lint }}
+        key: ${{ steps.analysis-cache.outputs.cache-primary-key }}

@@ -56,6 +56,92 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(policy["with"]["message"], "${{ github.event.pull_request.title }}")
         self.assertIn("automation", workflow["jobs"]["release"]["needs"])
 
+    def test_go_quality_separates_dependency_and_per_commit_caches(self):
+        steps = yaml.safe_load((ROOT / "go-quality/action.yml").read_text())["runs"]["steps"]
+        setup = next(step for step in steps if step.get("uses", "").startswith("actions/setup-go@"))
+        lint = next(step for step in steps if step.get("uses", "").startswith("golangci/golangci-lint-action@"))
+        self.assertIs(setup["with"]["cache"], False)
+        self.assertIs(lint["with"]["skip-cache"], True)
+
+        restores = {step["id"]: step for step in steps if step.get("uses", "").startswith("actions/cache/restore@")}
+        self.assertEqual(set(restores), {"modules-cache", "analysis-cache"})
+        modules = restores["modules-cache"]["with"]
+        analysis = restores["analysis-cache"]["with"]
+        platform = "${{ runner.os }}-${{ runner.arch }}-"
+        self.assertEqual(modules["path"], "${{ steps.cache-paths.outputs.go-mod }}")
+        self.assertEqual(
+            modules["key"],
+            "go-quality-modules-" + platform + "${{ hashFiles(inputs.go-version-file, '**/go.sum') }}",
+        )
+        self.assertEqual(modules["restore-keys"].splitlines(), ["go-quality-modules-" + platform])
+        self.assertEqual(
+            analysis["path"].splitlines(),
+            ["${{ steps.cache-paths.outputs.go-build }}", "${{ steps.cache-paths.outputs.golangci-lint }}"],
+        )
+        prefix = "go-quality-analysis-" + platform
+        version_prefix = prefix + "${{ hashFiles(inputs.go-version-file) }}-"
+        self.assertEqual(analysis["key"], version_prefix + "${{ github.sha }}")
+        self.assertEqual(analysis["restore-keys"].splitlines(), [version_prefix, prefix])
+
+        saves = [step for step in steps if step.get("uses", "").startswith("actions/cache/save@")]
+        self.assertEqual(len(saves), 2)
+        quality_index = next(index for index, step in enumerate(steps) if "/scripts/go-quality" in step.get("run", ""))
+        for save, cache_id in zip(saves, ["modules-cache", "analysis-cache"], strict=True):
+            with self.subTest(cache=cache_id):
+                self.assertGreater(steps.index(save), quality_index)
+                self.assertEqual(
+                    save["if"],
+                    "success() && "
+                    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && "
+                    f"steps.{cache_id}.outputs.cache-hit != 'true'",
+                )
+                self.assertEqual(save["with"]["path"], restores[cache_id]["with"]["path"])
+                self.assertEqual(save["with"]["key"], "${{ steps." + cache_id + ".outputs.cache-primary-key }}")
+                self.assertEqual(save["uses"].split("@", 1)[1], restores[cache_id]["uses"].split("@", 1)[1])
+
+    def test_go_quality_discovers_cache_paths_with_environment_overrides(self):
+        steps = yaml.safe_load((ROOT / "go-quality/action.yml").read_text())["runs"]["steps"]
+        locate = next(step for step in steps if step.get("id") == "cache-paths")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "outputs"
+            write_executable(
+                Path(directory) / "go",
+                '[ "$1" = env ] || exit 2\n'
+                'case "$2" in\n'
+                '  GOCACHE) printf "%s\\n" "$HOME/build cache" ;;\n'
+                '  GOMODCACHE) printf "%s\\n" "$HOME/module cache" ;;\n'
+                '  *) exit 2 ;;\n'
+                'esac',
+            )
+            env = os.environ | {
+                "PATH": f"{directory}:{os.environ['PATH']}",
+                "HOME": f"{directory}/home with spaces",
+                "GITHUB_OUTPUT": str(output),
+            }
+            env.pop("GOLANGCI_LINT_CACHE", None)
+            env.pop("XDG_CACHE_HOME", None)
+            for overrides, expected in [
+                ({}, f"{env['HOME']}/.cache/golangci-lint"),
+                ({"XDG_CACHE_HOME": "/custom cache"}, "/custom cache/golangci-lint"),
+                ({"GOLANGCI_LINT_CACHE": "/lint cache", "XDG_CACHE_HOME": "/ignored"}, "/lint cache"),
+                ({"GOLANGCI_LINT_CACHE": "", "XDG_CACHE_HOME": "/custom cache"}, "/custom cache/golangci-lint"),
+                ({"GOLANGCI_LINT_CACHE": "", "XDG_CACHE_HOME": ""}, f"{env['HOME']}/.cache/golangci-lint"),
+            ]:
+                with self.subTest(overrides=overrides):
+                    output.write_text("")
+                    subprocess.run(
+                        [locate["shell"], "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", locate["run"]],
+                        env=env | overrides, check=True,
+                    )
+                    self.assertEqual(
+                        dict(line.split("=", 1) for line in output.read_text().splitlines()),
+                        {
+                            "go-build": f"{env['HOME']}/build cache",
+                            "go-mod": f"{env['HOME']}/module cache",
+                            "golangci-lint": expected,
+                        },
+                    )
+
     def test_go_quality_fails_on_diff_even_when_formatter_returns_zero(self):
         for output, exit_code, expected in [("", 0, 0), ("formatting diff", 0, 1), ("", 2, 1)]:
             with self.subTest(output=output, exit_code=exit_code):
