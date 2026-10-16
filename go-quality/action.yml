@@ -7,15 +7,51 @@ inputs:
 runs:
   using: composite
   steps:
+    # The build and analysis caches below replace setup-go's and
+    # golangci-lint-action's. Both key on dependency files and never save again
+    # after a hit, so their entry freezes while the code it analyzes moves on.
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ inputs.go-version-file }}
+        cache: false
+    - name: Locate caches
+      id: cache-paths
+      shell: bash
+      run: |
+        { echo "go-build=$(go env GOCACHE)"; echo "go-mod=$(go env GOMODCACHE)"; } >> "$GITHUB_OUTPUT"
+        echo "golangci-lint=${GOLANGCI_LINT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/golangci-lint}" >> "$GITHUB_OUTPUT"
+    # Each default-branch run saves under its own key; every run restores the
+    # newest. Both caches are content-addressed, so a stale entry is still
+    # correct and only the packages that changed are analyzed again.
+    - name: Restore build and analysis caches
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.cache-paths.outputs.go-build }}
+          ${{ steps.cache-paths.outputs.go-mod }}
+          ${{ steps.cache-paths.outputs.golangci-lint }}
+        key: go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file) }}-${{ github.sha }}
+        restore-keys: |
+          go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file) }}-
+          go-quality-${{ runner.os }}-${{ runner.arch }}-
     - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
         version: v2.14.0
         install-only: true
+        skip-cache: true
     - name: Verify configuration, lint, and check formatting
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
       run: '"$ACTION_PATH/../scripts/go-quality"'
+    # Only the default branch saves, so pull requests cannot evict the
+    # repository's other caches or seed the entry the default branch restores.
+    - name: Save build and analysis caches
+      if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.cache-paths.outputs.go-build }}
+          ${{ steps.cache-paths.outputs.go-mod }}
+          ${{ steps.cache-paths.outputs.golangci-lint }}
+        key: go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.go-version-file) }}-${{ github.sha }}

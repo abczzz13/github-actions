@@ -16,7 +16,7 @@ read-only `contents` permissions unless a job publishes.
 
 | Path | Contract |
 | --- | --- |
-| `go-quality` | Uses `go.mod` (override `go-version-file`), sets up Go and pinned golangci-lint, then verifies the lint configuration, lints, and rejects formatter diffs without modifying files. The caller owns `.golangci.yml`, build tags, and formatter choice. |
+| `go-quality` | Uses `go.mod` (override `go-version-file`), sets up Go and pinned golangci-lint, then verifies the lint configuration, lints, and rejects formatter diffs without modifying files. The caller owns `.golangci.yml`, build tags, and formatter choice. Restores the newest Go build, module and lint caches on every run; only default-branch runs save them, one entry per commit. |
 | `automation-quality` | Installs checksum-verified Actionlint and ShellCheck, checks workflows and tracked/untracked non-ignored shell scripts (sh, bash, dash; `vendor/` and `.semgrep-rules/` skipped), and runs Zizmor. Both tools stay on `PATH` for later steps of the same job. Optional `shellcheck-excludes` must be justified by the caller. No Go toolchain is installed or changed. |
 | `go-security` | Sets up Go from `go.mod` (override `go-version-file`) and runs pinned govulncheck over `./...`. |
 | `semgrep` | Uses pinned scanner and rules. `rules` is a newline-separated list of relative paths within the rule checkout; defaults to Go injection/deserialization. Ignores vendor and the rule checkout. Reserves `.semgrep-rules/` in the caller workspace; add it to the caller's `.gitignore`. |
@@ -115,7 +115,7 @@ second group is reviewed manually, so check each entry when bumping anything nea
 
 | Pin | Location | Updated by |
 | --- | --- | --- |
-| `actions/*`, `golangci-lint-action`, `zizmor-action` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
+| `actions/*` (including `actions/cache`), `golangci-lint-action`, `zizmor-action` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
 | Commitizen and its transitive dependencies | `scripts/commitizen-requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | Test dependencies | `tests/requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | golangci-lint engine | `go-quality/action.yml` (`version`) | manual; [releases](https://github.com/golangci/golangci-lint/releases) |
