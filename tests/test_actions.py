@@ -18,6 +18,10 @@ def write_executable(path, body):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def go_quality_steps():
+    return yaml.safe_load((ROOT / "go-quality/action.yml").read_text())["runs"]["steps"]
+
+
 class ActionTests(unittest.TestCase):
     def test_actions_are_self_contained_and_sha_pinned(self):
         actions = sorted(ROOT.glob("*/action.yml"))
@@ -56,51 +60,106 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(policy["with"]["message"], "${{ github.event.pull_request.title }}")
         self.assertIn("automation", workflow["jobs"]["release"]["needs"])
 
-    def test_go_quality_separates_dependency_and_per_commit_caches(self):
-        steps = yaml.safe_load((ROOT / "go-quality/action.yml").read_text())["runs"]["steps"]
+    def test_go_quality_disables_builtin_caching(self):
+        steps = go_quality_steps()
         setup = next(step for step in steps if step.get("uses", "").startswith("actions/setup-go@"))
         lint = next(step for step in steps if step.get("uses", "").startswith("golangci/golangci-lint-action@"))
         self.assertIs(setup["with"]["cache"], False)
         self.assertIs(lint["with"]["skip-cache"], True)
 
-        restores = {step["id"]: step for step in steps if step.get("uses", "").startswith("actions/cache/restore@")}
+    def test_go_quality_separates_dependency_and_per_commit_cache_keys(self):
+        restores = {
+            step["id"]: step["with"] for step in go_quality_steps()
+            if step.get("uses", "").startswith("actions/cache/restore@")
+        }
         self.assertEqual(set(restores), {"modules-cache", "analysis-cache"})
-        modules = restores["modules-cache"]["with"]
-        analysis = restores["analysis-cache"]["with"]
         platform = "${{ runner.os }}-${{ runner.arch }}-"
-        self.assertEqual(modules["path"], "${{ steps.cache-paths.outputs.go-mod }}")
         self.assertEqual(
-            modules["key"],
+            restores["modules-cache"]["key"],
             "go-quality-modules-" + platform + "${{ hashFiles(inputs.go-version-file, '**/go.sum') }}",
         )
-        self.assertEqual(modules["restore-keys"].splitlines(), ["go-quality-modules-" + platform])
         self.assertEqual(
-            analysis["path"].splitlines(),
-            ["${{ steps.cache-paths.outputs.go-build }}", "${{ steps.cache-paths.outputs.golangci-lint }}"],
+            restores["analysis-cache"]["key"],
+            "go-quality-analysis-" + platform + "${{ hashFiles(inputs.go-version-file) }}-${{ github.sha }}",
+        )
+
+    def test_go_quality_orders_cache_restore_fallbacks(self):
+        restores = {
+            step["id"]: step["with"] for step in go_quality_steps()
+            if step.get("uses", "").startswith("actions/cache/restore@")
+        }
+        platform = "${{ runner.os }}-${{ runner.arch }}-"
+        self.assertEqual(
+            restores["modules-cache"]["restore-keys"].splitlines(),
+            ["go-quality-modules-" + platform],
         )
         prefix = "go-quality-analysis-" + platform
-        version_prefix = prefix + "${{ hashFiles(inputs.go-version-file) }}-"
-        self.assertEqual(analysis["key"], version_prefix + "${{ github.sha }}")
-        self.assertEqual(analysis["restore-keys"].splitlines(), [version_prefix, prefix])
+        self.assertEqual(
+            restores["analysis-cache"]["restore-keys"].splitlines(),
+            [prefix + "${{ hashFiles(inputs.go-version-file) }}-", prefix],
+        )
 
+    def test_go_quality_saves_reuse_restore_configuration_after_quality_checks(self):
+        steps = go_quality_steps()
+        restores = {step["id"]: step for step in steps if step.get("uses", "").startswith("actions/cache/restore@")}
+        self.assertEqual(restores["modules-cache"]["with"]["path"], "${{ steps.cache-paths.outputs.go-mod }}")
+        self.assertEqual(
+            restores["analysis-cache"]["with"]["path"].splitlines(),
+            ["${{ steps.cache-paths.outputs.go-build }}", "${{ steps.cache-paths.outputs.golangci-lint }}"],
+        )
         saves = [step for step in steps if step.get("uses", "").startswith("actions/cache/save@")]
         self.assertEqual(len(saves), 2)
         quality_index = next(index for index, step in enumerate(steps) if "/scripts/go-quality" in step.get("run", ""))
         for save, cache_id in zip(saves, ["modules-cache", "analysis-cache"], strict=True):
             with self.subTest(cache=cache_id):
+                self.assertLess(steps.index(restores[cache_id]), quality_index)
                 self.assertGreater(steps.index(save), quality_index)
-                self.assertEqual(
-                    save["if"],
-                    "success() && "
-                    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && "
-                    f"steps.{cache_id}.outputs.cache-hit != 'true'",
-                )
                 self.assertEqual(save["with"]["path"], restores[cache_id]["with"]["path"])
                 self.assertEqual(save["with"]["key"], "${{ steps." + cache_id + ".outputs.cache-primary-key }}")
                 self.assertEqual(save["uses"].split("@", 1)[1], restores[cache_id]["uses"].split("@", 1)[1])
 
+    def test_go_quality_cache_save_eligibility(self):
+        saves = [step for step in go_quality_steps() if step.get("uses", "").startswith("actions/cache/save@")]
+        cases = [
+            ("default-branch push", {}, True),
+            ("failed quality checks", {"succeeded": False}, False),
+            ("exact cache hit", {"cache_hit": "true"}, False),
+            ("cache miss", {"cache_hit": ""}, True),
+            ("feature-branch push", {"ref": "refs/heads/feature"}, False),
+            ("tag push", {"ref": "refs/tags/1.0.0"}, False),
+            ("PR merge ref", {"event": "pull_request", "ref": "refs/pull/1/merge"}, False),
+            ("PR default-branch ref", {"event": "pull_request"}, False),
+            ("PR target default-branch base ref", {"event": "pull_request_target"}, False),
+            ("PR target feature-branch base ref", {"event": "pull_request_target", "ref": "refs/heads/feature"}, False),
+            ("manual default-branch run", {"event": "workflow_dispatch"}, True),
+            ("manual feature-branch run", {"event": "workflow_dispatch", "ref": "refs/heads/feature"}, False),
+            ("scheduled default-branch run", {"event": "schedule"}, True),
+            ("non-main default branch", {"default_branch": "trunk", "ref": "refs/heads/trunk"}, True),
+            ("main is not the default branch", {"default_branch": "trunk"}, False),
+        ]
+        for save, cache_id in zip(saves, ["modules-cache", "analysis-cache"], strict=True):
+            for name, overrides, expected in cases:
+                with self.subTest(cache=cache_id, case=name):
+                    context = {
+                        "event": "push", "ref": "refs/heads/main", "default_branch": "main",
+                        "succeeded": True, "cache_hit": "false",
+                    } | overrides
+                    # Evaluate the guard's conjunction, rejecting unsupported clauses.
+                    # This is deliberately not a general GitHub expression interpreter.
+                    checks = {
+                        "success()": context["succeeded"],
+                        "github.event_name != 'pull_request'": context["event"] != "pull_request",
+                        "github.event_name != 'pull_request_target'": context["event"] != "pull_request_target",
+                        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)":
+                            context["ref"] == f"refs/heads/{context['default_branch']}",
+                        f"steps.{cache_id}.outputs.cache-hit != 'true'": context["cache_hit"] != "true",
+                    }
+                    clauses = [clause.strip() for clause in save["if"].split("&&")]
+                    self.assertLessEqual(set(clauses), checks.keys())
+                    self.assertEqual(all(checks[clause] for clause in clauses), expected)
+
     def test_go_quality_discovers_cache_paths_with_environment_overrides(self):
-        steps = yaml.safe_load((ROOT / "go-quality/action.yml").read_text())["runs"]["steps"]
+        steps = go_quality_steps()
         locate = next(step for step in steps if step.get("id") == "cache-paths")
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "outputs"
