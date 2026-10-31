@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Select the required Terraform version and report whether it must be installed.
+# A matching unwrapped terraform on PATH is reused, so later actions in the same
+# job and caller-installed CLIs do not trigger another download.
+set -euo pipefail
+
+# The default pin for every Terraform action.
+default=1.16.7
+version=${TERRAFORM_VERSION:-$default}
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]]; then
+    echo "terraform-version must be an exact version such as $default: $version" >&2
+    exit 1
+fi
+
+install=true
+# The setup-terraform wrapper rewrites output; replace it with an unwrapped CLI.
+if command -v terraform >/dev/null && ! command -v terraform-bin >/dev/null; then
+    installed=$(terraform version -json) || installed=
+    if [[ "$installed" =~ \"terraform_version\":\ *\"([^\"]+)\" && "${BASH_REMATCH[1]}" == "$version" ]]; then
+        install=false
+    fi
+fi
+echo "Terraform $version: install=$install"
+{ echo "version=$version"; echo "install=$install"; } >>"$GITHUB_OUTPUT"

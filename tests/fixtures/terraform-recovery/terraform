@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake Terraform for the recovery action fixture. Never contact a backend/provider.
+set -euo pipefail
+
+# Report a fixture version, so the actions reuse this executable instead of installing one.
+if [[ "$*" == 'version -json' ]]; then
+    printf '{"terraform_version": "0.0.0-fixture"}\n'
+    exit 0
+fi
+if [[ "${1:-}" != -chdir=* ]]; then
+    echo 'The recovery fixture requires -chdir.' >&2
+    exit 2
+fi
+root=${1#-chdir=}
+shift
+case "${1:-}" in
+    init) ;;
+    plan)
+        for argument in "$@"; do
+            if [[ "$argument" == -out=* ]]; then
+                printf 'synthetic plan\n' >"${argument#-out=}"
+            fi
+        done
+        ;;
+    apply)
+        case "${RECOVERY_FIXTURE_FAILURE:?}" in
+            state) printf '{"fixture":"not-real-state"}\n' >"$root/errored.tfstate" ;;
+            ordinary) ;;
+            *) echo 'Unknown recovery fixture failure.' >&2; exit 2 ;;
+        esac
+        echo 'Synthetic apply failure' >&2
+        exit 1
+        ;;
+    *) echo 'Unsupported recovery fixture command.' >&2; exit 2 ;;
+esac

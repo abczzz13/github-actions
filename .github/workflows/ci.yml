@@ -61,12 +61,120 @@ jobs:
             exit 1
           fi
           cmp fixture.go "$RUNNER_TEMP/unformatted.go"
+  terraform:
+    name: Terraform consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare consuming repository fixture
+        run: cp -R tests/fixtures/terraform/. .
+      - uses: ./terraform-quality
+        with:
+          # Built-in terraform_data only; the fixture test never creates resources.
+          run-tests: 'true'
+      # terraform-quality left the pinned CLI on PATH; later actions reuse it.
+      - name: Test real Terraform recovery against a rejecting local HTTP backend
+        run: python3 tests/test_terraform_integration.py -v
+      # The fixture has no backend and only built-in resources: local state, no accounts.
+      - id: plan
+        uses: ./terraform-plan
+        with:
+          root: environments/example
+      - id: apply
+        uses: ./terraform-apply
+        with:
+          root: environments/example
+          state-recovery: github-artifact
+      - id: replan
+        uses: ./terraform-plan
+        with:
+          root: environments/example
+      - name: Prove plans report changes before the apply and none after it
+        env:
+          BEFORE: ${{ steps.plan.outputs.changes }}
+          APPLIED: ${{ steps.apply.outputs.changes }}
+          AFTER: ${{ steps.replan.outputs.changes }}
+        run: test "$BEFORE" = true && test "$APPLIED" = true && test "$AFTER" = false
+      - name: Prove formatting checks unselected and hidden roots without rewriting files
+        run: |
+          # fmt -recursive skips hidden directories, so a selected hidden root is checked explicitly.
+          for case in modules/unformatted:environments/example .infra/unformatted:.infra/unformatted; do
+            directory=${case%%:*}
+            mkdir -p "$directory"
+            printf 'resource "terraform_data" "unformatted" {\ninput="x"\n}\n' > "$directory/main.tf"
+            cp "$directory/main.tf" "$RUNNER_TEMP/unformatted.tf"
+            if TERRAFORM_ROOTS=${case#*:} ./scripts/terraform-quality; then
+              echo "Quality check accepted unformatted Terraform in $directory" >&2
+              exit 1
+            fi
+            cmp "$directory/main.tf" "$RUNNER_TEMP/unformatted.tf"
+            rm -r "$directory"
+          done
+  terraform-recovery:
+    name: Terraform recovery (${{ matrix.failure }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        failure: [state, ordinary]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare a failing Terraform executable without real state or accounts
+        env:
+          FAILURE: ${{ matrix.failure }}
+        run: |
+          # Also exercise recovery from a hidden root directory.
+          mkdir ".recovery-$FAILURE"
+          mkdir -p "$RUNNER_TEMP/terraform-recovery-tools"
+          install -m 0755 tests/fixtures/terraform-recovery/terraform "$RUNNER_TEMP/terraform-recovery-tools/terraform"
+          echo "$RUNNER_TEMP/terraform-recovery-tools" >> "$GITHUB_PATH"
+      - name: Exercise the composite action's failure and upload path
+        id: recovery
+        continue-on-error: true
+        uses: ./terraform-apply
+        env:
+          RECOVERY_FIXTURE_FAILURE: ${{ matrix.failure }}
+        with:
+          root: .recovery-${{ matrix.failure }}
+          state-recovery: github-artifact
+          # Bring-your-own Terraform: the matching fake on PATH is reused, not replaced.
+          terraform-version: 0.0.0-fixture
+      - name: Require the synthetic apply to fail and expose its recovery name
+        env:
+          OUTCOME: ${{ steps.recovery.outcome }}
+          ARTIFACT: ${{ steps.recovery.outputs.errored-state-artifact }}
+        run: test "$OUTCOME" = failure && test -n "$ARTIFACT"
+      - name: Download emergency state, or prove there is no artifact
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.recovery.outputs.errored-state-artifact }}
+          path: ${{ runner.temp }}/terraform-recovery-download
+      - name: Verify artifact content and ordinary-failure behavior
+        env:
+          FAILURE: ${{ matrix.failure }}
+          DOWNLOAD: ${{ steps.download.outcome }}
+        run: |
+          if [[ "$FAILURE" == state ]]; then
+            test "$DOWNLOAD" = success
+            printf '{"fixture":"not-real-state"}\n' > "$RUNNER_TEMP/expected-recovery"
+            cmp "$RUNNER_TEMP/expected-recovery" "$RUNNER_TEMP/terraform-recovery-download/errored.tfstate"
+          else
+            test "$DOWNLOAD" = failure
+            test ! -e "$RUNNER_TEMP/terraform-recovery-download/errored.tfstate"
+          fi
   release:
     name: Tag release
     # Same-workflow gating on the CI jobs above satisfies the release rules in
     # the README without workflow_run identity checks.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [automation, consumers]
+    needs: [automation, consumers, terraform, terraform-recovery]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

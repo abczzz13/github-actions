@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 import tempfile
@@ -9,13 +8,7 @@ import unittest
 from commitizen.exceptions import ExitCode
 import yaml
 
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def write_executable(path, body):
-    path.write_text(f"#!/bin/sh\n{body}\n")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+from helpers import ROOT, write_executable
 
 
 def go_quality_steps():
@@ -25,7 +18,7 @@ def go_quality_steps():
 class ActionTests(unittest.TestCase):
     def test_actions_are_self_contained_and_sha_pinned(self):
         actions = sorted(ROOT.glob("*/action.yml"))
-        self.assertEqual(len(actions), 6)
+        self.assertEqual(len(actions), 9)
         for path in actions:
             with self.subTest(action=path.parent.name):
                 action = yaml.safe_load(path.read_text())
@@ -298,6 +291,20 @@ class ActionTests(unittest.TestCase):
                 sorted(log.read_text().splitlines()),
                 ["--exclude=SC2034,SC2154", "bash-shebang", "dash-shebang", "sh-shebang", "suffix.sh"],
             )
+
+    def test_terraform_actions_share_one_install_definition(self):
+        def install_steps(action):
+            return yaml.safe_load((ROOT / action / "action.yml").read_text())["runs"]["steps"][:2]
+
+        select, setup = install_steps("terraform-quality")
+        for action in ["terraform-plan", "terraform-apply"]:
+            with self.subTest(action=action):
+                self.assertEqual(install_steps(action), [select, setup])
+        self.assertEqual(select["id"], "terraform")
+        self.assertEqual(setup["if"], "steps.terraform.outputs.install == 'true'")
+        self.assertTrue(setup["uses"].startswith("hashicorp/setup-terraform@"))
+        self.assertEqual(setup["with"]["terraform_version"], "${{ steps.terraform.outputs.version }}")
+        self.assertIs(setup["with"]["terraform_wrapper"], False)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Plan one root, or plan it and apply exactly that saved plan.
+set -euo pipefail
+
+# shellcheck source=scripts/terraform-common
+source "$(dirname "${BASH_SOURCE[0]}")/terraform-common"
+mode=${1:-}
+root=$(terraform_root "${TERRAFORM_ROOT:-}")
+
+# Plan the root with any extra arguments and publish whether it has changes.
+plan() {
+    local status=0
+    terraform -chdir="$root" plan -lock-timeout=5m -detailed-exitcode "$@" || status=$?
+    case "$status" in
+        0) echo 'changes=false' >>"$GITHUB_OUTPUT" ;;
+        2) echo 'changes=true' >>"$GITHUB_OUTPUT" ;;
+        *) return "$status" ;;
+    esac
+}
+
+case "$mode" in
+    plan)
+        terraform -chdir="$root" init -lockfile=readonly
+        plan
+        ;;
+    apply)
+        recovery=${TERRAFORM_STATE_RECOVERY:-}
+        case "$recovery" in
+            github-artifact|none) ;;
+            *)
+                echo 'Set state-recovery to github-artifact to upload emergency state as a GitHub artifact, or to none to handle errored-state-path in a later step.' >&2
+                exit 1
+                ;;
+        esac
+        errored="$root/errored.tfstate"
+        # A leftover file would look as if this run had failed to save state.
+        if [[ -e "$errored" || -L "$errored" ]]; then
+            echo "Refusing to apply: $errored exists. Resolve it first." >&2
+            exit 1
+        fi
+        plan_dir=$(mktemp -d "${RUNNER_TEMP:?}/terraform-apply.XXXXXXXXXXXXXXXX")
+        trap 'rm -rf -- "$plan_dir"' EXIT
+        # Publish recovery metadata before Terraform. Upload after cancellation is best effort.
+        echo "errored-state-path=$errored" >>"$GITHUB_OUTPUT"
+        if [[ "$recovery" == github-artifact ]]; then
+            # The random suffix separates repeated roots, matrix jobs and flattened paths.
+            echo "errored-state-artifact=errored-tfstate-${root//\//-}-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-${plan_dir##*.}" >>"$GITHUB_OUTPUT"
+        fi
+        terraform -chdir="$root" init -lockfile=readonly
+        plan -out="$plan_dir/tfplan"
+        # Terraform rejects the saved plan if the state changed after planning.
+        terraform -chdir="$root" apply -lock-timeout=5m "$plan_dir/tfplan"
+        ;;
+    *)
+        echo 'Usage: terraform-run plan|apply' >&2
+        exit 1
+        ;;
+esac

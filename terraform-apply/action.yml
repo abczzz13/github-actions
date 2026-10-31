@@ -1,0 +1,66 @@
+name: Terraform apply
+description: Plan one Terraform root and apply exactly that plan on Linux; authenticate first.
+inputs:
+  root:
+    description: Repository-relative Terraform root directory.
+    required: true
+  state-recovery:
+    description: >-
+      Required. github-artifact uploads emergency state, which may hold secrets, as an
+      unencrypted 3-day artifact. none uploads nothing; preserve errored-state-path in a
+      later step or accept that it is lost with the runner.
+    required: true
+  terraform-version:
+    description: Exact Terraform version. Empty selects the pinned default. A matching terraform on PATH is reused.
+    default: ''
+outputs:
+  changes:
+    description: "'true' when the applied plan had changes, 'false' when it had none."
+    value: ${{ steps.apply.outputs.changes }}
+  errored-state-path:
+    description: Repository-relative path where Terraform writes state it could not save.
+    value: ${{ steps.apply.outputs.errored-state-path }}
+  errored-state-artifact:
+    description: With github-artifact, the unique artifact name reserved for emergency state.
+    value: ${{ steps.apply.outputs.errored-state-artifact }}
+runs:
+  using: composite
+  steps:
+    # Keep these two steps identical in every Terraform action; tests enforce it.
+    - name: Select Terraform
+      id: terraform
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        TERRAFORM_VERSION: ${{ inputs.terraform-version }}
+      run: '"$ACTION_PATH/../scripts/terraform-version"'
+    # The wrapper rewrites stdout for step outputs and mangles plan output in logs.
+    - if: steps.terraform.outputs.install == 'true'
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      with:
+        terraform_version: ${{ steps.terraform.outputs.version }}
+        terraform_wrapper: false
+    - name: Plan and apply the saved plan
+      id: apply
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        TERRAFORM_ROOT: ${{ inputs.root }}
+        TERRAFORM_STATE_RECOVERY: ${{ inputs.state-recovery }}
+      run: '"$ACTION_PATH/../scripts/terraform-run" apply'
+    # If Terraform cannot write state to the backend, it saves errored.tfstate.
+    # Try to preserve it after failure or cancellation. Runner loss prevents upload.
+    - name: Keep state that could not be saved
+      if: >-
+        always() &&
+        steps.apply.outputs.errored-state-artifact != '' &&
+        hashFiles(steps.apply.outputs.errored-state-path) != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.apply.outputs.errored-state-artifact }}
+        path: ${{ steps.apply.outputs.errored-state-path }}
+        if-no-files-found: error
+        overwrite: false
+        # The exact file may be inside a hidden root such as .infra/.
+        include-hidden-files: true
+        retention-days: 3

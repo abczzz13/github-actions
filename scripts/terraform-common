@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+export TF_IN_AUTOMATION=true TF_INPUT=0
+
+# Accept a relative path within the repository. Extra characters, such as '*'
+# for root patterns, may be allowed by the caller.
+safe_relative_path() {
+    local path=$1 extra=${2:-}
+    [[ "$path" =~ ^[a-zA-Z0-9_./${extra}-]+$ && "$path" != /* && "/$path/" != */../* ]]
+}
+
+# Resolve a caller-owned root and reject paths outside the checkout.
+terraform_root() {
+    local path=$1 repository directory
+    if ! safe_relative_path "$path" || [[ ! -d "$path" ]]; then
+        echo "The Terraform root must be an existing relative directory within the repository: $path" >&2
+        return 1
+    fi
+    repository=$(pwd -P)
+    directory=$(cd -- "$path" && pwd -P) || return 1
+    if [[ "$directory" == "$repository" ]]; then
+        printf '.\n'
+    elif [[ "$directory" == "$repository/"* ]]; then
+        path=${directory#"$repository/"}
+        # A symlink or glob must not introduce unsupported characters either.
+        if safe_relative_path "$path"; then
+            printf '%s\n' "$path"
+        else
+            echo "Unsupported characters in the resolved Terraform root: $path" >&2
+            return 1
+        fi
+    else
+        echo "The Terraform root resolves outside the repository: $path" >&2
+        return 1
+    fi
+}
