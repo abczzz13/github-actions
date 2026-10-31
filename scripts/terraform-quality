@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=scripts/terraform-common
+source "$(dirname "${BASH_SOURCE[0]}")/terraform-common"
+run_tests=${TERRAFORM_RUN_TESTS:-false}
+case "$run_tests" in
+    true|false) ;;
+    *) echo 'run-tests must be true or false.' >&2; exit 1 ;;
+esac
+config="$PWD/.tflint.hcl"
+if [[ ! -f "$config" ]]; then
+    echo 'The caller must provide .tflint.hcl at the repository root.' >&2
+    exit 1
+fi
+
+# Print the path up to its first hidden directory, if it has one.
+hidden_ancestor() {
+    local part prefix='' IFS=/
+    for part in $1; do
+        prefix+=${prefix:+/}$part
+        if [[ "$part" == .?* ]]; then
+            printf '%s\n' "$prefix"
+            return
+        fi
+    done
+}
+
+# Expand a glob into matches without word splitting, in lexical order.
+# nullglob drops an unmatched pattern.
+expand_pattern() {
+    local IFS=
+    # shellcheck disable=SC2206
+    matches=($1)
+}
+
+roots=()
+declare -A seen=()
+shopt -s nullglob
+export LC_ALL=C
+while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] || continue
+    if ! safe_relative_path "$pattern" '*'; then
+        echo "Terraform roots must be relative paths or globs within the repository: $pattern" >&2
+        exit 1
+    fi
+    expand_pattern "$pattern"
+    found=0
+    for match in "${matches[@]}"; do
+        # A glob such as environments/* may also match files; only directories are roots.
+        [[ -d "$match" ]] || continue
+        root=$(terraform_root "$match")
+        if [[ ! -v 'seen[$root]' ]]; then
+            roots+=("$root")
+            seen["$root"]=1
+        fi
+        found=1
+    done
+    if ((found == 0)); then
+        echo "No Terraform root directory matches: $pattern" >&2
+        exit 1
+    fi
+done <<<"${TERRAFORM_ROOTS:?At least one Terraform root is required}"
+if ((${#roots[@]} == 0)); then
+    echo 'At least one Terraform root is required.' >&2
+    exit 1
+fi
+
+# fmt -recursive skips hidden directories, so also name hidden ones holding roots.
+format_targets=(.)
+declare -A formatted=()
+for root in "${roots[@]}"; do
+    hidden=$(hidden_ancestor "$root")
+    if [[ -n "$hidden" && ! -v 'formatted[$hidden]' ]]; then
+        format_targets+=("$hidden")
+        formatted["$hidden"]=1
+    fi
+done
+if ! terraform fmt -check -recursive -diff "${format_targets[@]}"; then
+    echo 'Terraform formatting differs; run terraform fmt -recursive and commit the result.' >&2
+    exit 1
+fi
+
+# Download each provider once for all roots, unless the caller chose a cache.
+if [[ -z "${TF_PLUGIN_CACHE_DIR:-}" ]]; then
+    TF_PLUGIN_CACHE_DIR=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/terraform-plugins.XXXXXX")
+    export TF_PLUGIN_CACHE_DIR
+    trap 'rm -rf -- "$TF_PLUGIN_CACHE_DIR"' EXIT
+fi
+tflint --init --config="$config"
+for root in "${roots[@]}"; do
+    echo "::group::$root"
+    terraform -chdir="$root" init -backend=false -lockfile=readonly
+    terraform -chdir="$root" validate
+    tflint --chdir="$root" --config="$config" --format=compact
+    # Backend-free init does not make tests safe: callers must select offline tests.
+    if [[ "$run_tests" == true ]]; then
+        terraform -chdir="$root" test
+    fi
+    echo '::endgroup::'
+done

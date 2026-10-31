@@ -9,6 +9,9 @@ updates:
       - /semgrep
       - /commit-policy
       - /commitizen-bump
+      - /terraform-quality
+      - /terraform-plan
+      - /terraform-apply
     schedule:
       interval: weekly
     cooldown:
