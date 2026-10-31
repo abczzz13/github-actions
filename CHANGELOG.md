@@ -1,3 +1,9 @@
+## 2.0.0 (2026-10-31)
+
+### Feat
+
+- add Terraform quality, plan and apply actions (#14)
+
 ## 1.0.0 (2026-10-16)
 
 ### Refactor
