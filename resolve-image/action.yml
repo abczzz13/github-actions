@@ -1,0 +1,50 @@
+name: Resolve image
+description: Resolve a registry tag to an immutable digest and verify the image's platform and OCI source labels.
+inputs:
+  image:
+    description: Lowercase image repository without tag or digest, such as ghcr.io/owner/name. Docker Hub namespace/name inputs are normalized to docker.io/namespace/name.
+    required: true
+  tag:
+    description: Tag to resolve.
+    required: true
+  revision:
+    description: Full commit SHA that the org.opencontainers.image.revision label must name.
+    required: true
+  version:
+    description: Value that the org.opencontainers.image.version label must have.
+    required: true
+  platform:
+    description: Platform to pull and verify, as os/architecture. Requires Docker CLI and Engine 28.1+ (API 1.49+).
+    default: linux/amd64
+  allow-missing:
+    description: "'true' outputs an empty digest when the tag does not exist. Registry errors still fail."
+    default: "false"
+outputs:
+  digest:
+    description: Verified sha256 digest, or empty when allow-missing is 'true' and the tag does not exist.
+    value: ${{ steps.resolve.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    # The missing-tag check matches this buildx version's exact diagnostic.
+    # Re-verify that text when bumping. The built-in driver avoids pulling and
+    # booting a separate BuildKit image before validation. use: false leaves
+    # the caller's builder selected for its own builds.
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        version: v0.35.0
+        cache-binary: false
+        driver: docker
+        use: false
+    - name: Resolve and verify image
+      id: resolve
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        IMAGE: ${{ inputs.image }}
+        TAG: ${{ inputs.tag }}
+        REVISION: ${{ inputs.revision }}
+        VERSION: ${{ inputs.version }}
+        PLATFORM: ${{ inputs.platform }}
+        ALLOW_MISSING: ${{ inputs.allow-missing }}
+      run: '"$ACTION_PATH/../scripts/resolve-image"'

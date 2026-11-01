@@ -18,7 +18,7 @@ def go_quality_steps():
 class ActionTests(unittest.TestCase):
     def test_actions_are_self_contained_and_sha_pinned(self):
         actions = sorted(ROOT.glob("*/action.yml"))
-        self.assertEqual(len(actions), 9)
+        self.assertEqual(len(actions), 10)
         for path in actions:
             with self.subTest(action=path.parent.name):
                 action = yaml.safe_load(path.read_text())
