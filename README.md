@@ -1,7 +1,8 @@
 # Shared GitHub Actions
 
 Small, versioned CI building blocks for `abczzz13/wbso-backend`,
-`abczzz13/forklog-backend` and the Terraform repository `tdejongio/forklog-infra`.
+`abczzz13/forklog-backend`, `tdejongio/forklog-frontend` and the Terraform
+repository `tdejongio/forklog-infra`.
 Consumers pin a full commit SHA, not `main` or a
 moving version tag, with the version as a trailing comment. Dependabot
 discovers newer versions through this repository's semantic tags and proposes
@@ -12,8 +13,8 @@ updated SHAs independently.
 All actions run at the consuming repository's root after its checkout with
 `persist-credentials: false`. Scripts ship with the action; they never depend on
 consumer-owned copies. Linux runners are supported; automation-quality currently
-requires AMD64, and semgrep requires Docker. Run jobs with explicit timeouts and
-read-only `contents` permissions unless a job publishes.
+requires AMD64, and semgrep and resolve-image require Docker. Run jobs with
+explicit timeouts and read-only `contents` permissions unless a job publishes.
 
 | Path | Contract |
 | --- | --- |
@@ -23,6 +24,7 @@ read-only `contents` permissions unless a job publishes.
 | `semgrep` | Uses pinned scanner and rules. `rules` is a newline-separated list of relative paths within the rule checkout; defaults to Go injection/deserialization. Ignores vendor and the rule checkout. Reserves `.semgrep-rules/` in the caller workspace; add it to the caller's `.gitignore`. |
 | `commit-policy` | Checks `message`, or HEAD's commit message when omitted, using the same Commitizen version as the bump action. The caller checks PR titles on `edited` as well as normal PR events. |
 | `commitizen-bump` | Requires `token` and `validated-sha`; optional `branch` defaults to `main`. Outputs `created`, `version`, `tag`, and `sha`. See release safety below. |
+| `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Installs the pinned buildx without selecting it as the builder. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+# Every input is checked before the registry is contacted.
+[[ "${IMAGE:-}" =~ ^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ ]] ||
+    fail "Image '${IMAGE:-}' must be a lowercase repository without tag or digest."
+[[ "${TAG:-}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || fail "Tag '${TAG:-}' is not a valid image tag."
+[[ "${REVISION:-}" =~ ^[0-9a-f]{40}$ ]] || fail "Revision '${REVISION:-}' is not a full commit SHA."
+[[ -n "${VERSION:-}" ]] || fail 'A version is required.'
+[[ "${PLATFORM:-}" =~ ^([a-z0-9]+)/([a-z0-9]+)$ ]] || fail "Platform '${PLATFORM:-}' must be os/architecture."
+os=${BASH_REMATCH[1]}
+arch=${BASH_REMATCH[2]}
+[[ "${ALLOW_MISSING:-}" == true || "${ALLOW_MISSING:-}" == false ]] || fail "allow-missing must be 'true' or 'false'."
+
+reference="$IMAGE:$TAG"
+errors=$(mktemp)
+trap 'rm -f "$errors"' EXIT
+if ! manifest=$(docker buildx imagetools inspect "$reference" --format '{{json .Manifest}}' 2>"$errors"); then
+    # Only this exact line means the tag is absent; any other failure is a
+    # registry error and must never look like a missing image.
+    if [[ "$ALLOW_MISSING" == true ]] && grep -Fxq "ERROR: $reference: not found" "$errors"; then
+        echo 'digest=' >>"$GITHUB_OUTPUT"
+        echo "$reference does not exist."
+        exit 0
+    fi
+    cat "$errors" >&2
+    fail "Inspecting $reference failed."
+fi
+digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$manifest") ||
+    fail "Registry returned no valid immutable digest for $reference."
+docker pull --platform "$PLATFORM" "$IMAGE@$digest" >/dev/null || fail "Pulling $IMAGE@$digest failed."
+docker image inspect "$IMAGE@$digest" | jq -e --arg os "$os" --arg arch "$arch" \
+    --arg revision "$REVISION" --arg version "$VERSION" '
+    .[0] | .Os == $os and .Architecture == $arch and
+    .Config.Labels["org.opencontainers.image.revision"] == $revision and
+    .Config.Labels["org.opencontainers.image.version"] == $version' >/dev/null ||
+    fail "$reference ($digest) is not $PLATFORM built from $REVISION as version $VERSION."
+echo "digest=$digest" >>"$GITHUB_OUTPUT"
+echo "Verified $reference as $digest."
