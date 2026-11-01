@@ -2,7 +2,7 @@ name: Resolve image
 description: Resolve a registry tag to an immutable digest and verify the image's platform and OCI source labels.
 inputs:
   image:
-    description: Lowercase image repository without tag or digest, such as ghcr.io/owner/name.
+    description: Lowercase image repository without tag or digest, such as ghcr.io/owner/name. Docker Hub namespace/name inputs are normalized to docker.io/namespace/name.
     required: true
   tag:
     description: Tag to resolve.
@@ -14,7 +14,7 @@ inputs:
     description: Value that the org.opencontainers.image.version label must have.
     required: true
   platform:
-    description: Platform to pull and verify, as os/architecture.
+    description: Platform to pull and verify, as os/architecture. Requires Docker CLI and Engine 28.1+ (API 1.49+).
     default: linux/amd64
   allow-missing:
     description: "'true' outputs an empty digest when the tag does not exist. Registry errors still fail."
@@ -27,12 +27,14 @@ runs:
   using: composite
   steps:
     # The missing-tag check matches this buildx version's exact diagnostic.
-    # Re-verify that text when bumping. use: false leaves the caller's builder
-    # selected for its own builds.
+    # Re-verify that text when bumping. The built-in driver avoids pulling and
+    # booting a separate BuildKit image before validation. use: false leaves
+    # the caller's builder selected for its own builds.
     - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
         version: v0.35.0
         cache-binary: false
+        driver: docker
         use: false
     - name: Resolve and verify image
       id: resolve

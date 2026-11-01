@@ -24,6 +24,8 @@ case "$1 $2" in
     printf '{"digest":"%s"}\\n' "$MANIFEST_DIGEST" ;;
   'pull --platform') [[ "$PULL" == ok ]] ;;
   'image inspect')
+    # Without an explicit platform, a multi-platform store selects the host.
+    if [[ "${3:-}" != --platform || "${4:-}" != "$PLATFORM" ]]; then LABEL_ARCH="$HOST_ARCH"; fi
     printf '[{"Os":"%s","Architecture":"%s","Config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.version":"%s"}}}]\\n' \\
       "$LABEL_OS" "$LABEL_ARCH" "$LABEL_REVISION" "$LABEL_VERSION" ;;
   *) echo "unexpected docker $*" >&2; exit 1 ;;
@@ -46,7 +48,8 @@ class ResolveImageTests(unittest.TestCase):
                 "IMAGE": IMAGE, "TAG": "1.2.3", "REVISION": REVISION, "VERSION": "1.2.3",
                 "PLATFORM": "linux/amd64", "ALLOW_MISSING": "false",
                 "INSPECT": "ok", "INSPECT_ERROR": "", "MANIFEST_DIGEST": DIGEST, "PULL": "ok",
-                "LABEL_OS": "linux", "LABEL_ARCH": "amd64", "LABEL_REVISION": REVISION, "LABEL_VERSION": "1.2.3",
+                "HOST_ARCH": "amd64", "LABEL_OS": "linux", "LABEL_ARCH": "amd64",
+                "LABEL_REVISION": REVISION, "LABEL_VERSION": "1.2.3",
             } | overrides
             result = subprocess.run([str(ROOT / "scripts/resolve-image")], env=env, capture_output=True, text=True)
             return result, output.read_text(), calls.read_text().splitlines()
@@ -58,8 +61,57 @@ class ResolveImageTests(unittest.TestCase):
         # The image is pulled and inspected by digest, never by the movable tag.
         self.assertEqual(calls[1:], [
             f"pull --platform linux/amd64 {IMAGE}@{DIGEST}",
-            f"image inspect {IMAGE}@{DIGEST}",
+            f"image inspect --platform linux/amd64 {IMAGE}@{DIGEST}",
         ])
+
+    def test_inspects_the_requested_platform_not_the_cached_host_variant(self):
+        result, output, calls = self.resolve(PLATFORM="linux/arm64", LABEL_ARCH="arm64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, f"digest={DIGEST}\n")
+        self.assertEqual(calls[1:], [
+            f"pull --platform linux/arm64 {IMAGE}@{DIGEST}",
+            f"image inspect --platform linux/arm64 {IMAGE}@{DIGEST}",
+        ])
+
+    def test_normalizes_docker_hub_references(self):
+        for image, canonical in [
+            ("library/alpine", "docker.io/library/alpine"),
+            ("docker.io/alpine", "docker.io/library/alpine"),
+            ("docker.io/library/alpine", "docker.io/library/alpine"),
+            ("index.docker.io/alpine", "docker.io/library/alpine"),
+            ("index.docker.io/library/alpine", "docker.io/library/alpine"),
+            ("owner/app", "docker.io/owner/app"),
+            ("owner/nested/app", "docker.io/owner/nested/app"),
+            ("index.docker.io/owner/app", "docker.io/owner/app"),
+        ]:
+            with self.subTest(image=image):
+                result, output, calls = self.resolve(IMAGE=image)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f"digest={DIGEST}\n")
+                self.assertEqual(calls, [
+                    f"buildx imagetools inspect {canonical}:1.2.3 --format {{{{json .Manifest}}}}",
+                    f"pull --platform linux/amd64 {canonical}@{DIGEST}",
+                    f"image inspect --platform linux/amd64 {canonical}@{DIGEST}",
+                ])
+                # Buildx v0.35.0 reports the normalized name, not the input.
+                result, output, calls = self.resolve(
+                    IMAGE=image, INSPECT="error", ALLOW_MISSING="true",
+                    INSPECT_ERROR=f"ERROR: {canonical}:1.2.3: not found",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, "digest=\n")
+                self.assertEqual(len(calls), 1)
+
+    def test_accepts_valid_repository_names(self):
+        for image in [
+            "localhost/app", "localhost:5000/owner/app", "registry.example:5000/owner/app",
+            "ghcr.io/owner/app.name_with__separators--and---dashes",
+            "ghcr.io/" + "a" * 247,
+        ]:
+            with self.subTest(image=image):
+                result, output, _ = self.resolve(IMAGE=image)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f"digest={DIGEST}\n")
 
     def test_reports_an_absent_tag_only_when_allowed(self):
         result, output, calls = self.resolve(INSPECT="missing", ALLOW_MISSING="true")
@@ -106,6 +158,19 @@ class ResolveImageTests(unittest.TestCase):
             ("image with digest", {"IMAGE": f"{IMAGE}@{DIGEST}"}),
             ("uppercase image", {"IMAGE": "ghcr.io/Owner/app"}),
             ("image without repository", {"IMAGE": "ghcr.io"}),
+            ("leading repository separator", {"IMAGE": "ghcr.io/owner/-app"}),
+            ("trailing repository separator", {"IMAGE": "ghcr.io/owner/app."}),
+            ("dot repository component", {"IMAGE": "ghcr.io/owner/."}),
+            ("parent repository component", {"IMAGE": "ghcr.io/owner/.."}),
+            ("empty repository component", {"IMAGE": "ghcr.io/owner//app"}),
+            ("trailing slash", {"IMAGE": "ghcr.io/owner/app/"}),
+            ("repeated dots", {"IMAGE": "ghcr.io/owner/app..name"}),
+            ("three underscores", {"IMAGE": "ghcr.io/owner/app___name"}),
+            ("mixed separators", {"IMAGE": "ghcr.io/owner/app._name"}),
+            ("invalid registry label", {"IMAGE": "-registry.example/app"}),
+            ("empty registry label", {"IMAGE": "registry..example/app"}),
+            ("invalid registry port", {"IMAGE": "registry.example:abc/app"}),
+            ("long repository name", {"IMAGE": "ghcr.io/" + "a" * 248}),
             ("empty tag", {"TAG": ""}),
             ("tag with option", {"TAG": "-v"}),
             ("tag with path", {"TAG": "1.2.3/x"}),
@@ -125,7 +190,10 @@ class ResolveImageTests(unittest.TestCase):
         action = yaml.safe_load((ROOT / "resolve-image/action.yml").read_text())
         setup = action["runs"]["steps"][0]
         self.assertTrue(setup["uses"].startswith("docker/setup-buildx-action@"))
-        self.assertEqual(setup["with"], {"version": "v0.35.0", "cache-binary": False, "use": False})
+        # The built-in driver does not pull or boot a separate BuildKit image.
+        self.assertEqual(setup["with"], {
+            "version": "v0.35.0", "cache-binary": False, "driver": "docker", "use": False,
+        })
         self.assertEqual(action["inputs"]["allow-missing"]["default"], "false")
 
 

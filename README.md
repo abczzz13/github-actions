@@ -24,7 +24,7 @@ explicit timeouts and read-only `contents` permissions unless a job publishes.
 | `semgrep` | Uses pinned scanner and rules. `rules` is a newline-separated list of relative paths within the rule checkout; defaults to Go injection/deserialization. Ignores vendor and the rule checkout. Reserves `.semgrep-rules/` in the caller workspace; add it to the caller's `.gitignore`. |
 | `commit-policy` | Checks `message`, or HEAD's commit message when omitted, using the same Commitizen version as the bump action. The caller checks PR titles on `edited` as well as normal PR events. |
 | `commitizen-bump` | Requires `token` and `validated-sha`; optional `branch` defaults to `main`. Outputs `created`, `version`, `tag`, and `sha`. See release safety below. |
-| `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Installs the pinned buildx without selecting it as the builder. |
+| `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Requires Docker CLI and Engine 28.1+ (API 1.49+). Installs the pinned buildx without selecting a builder or starting a separate BuildKit container. See the image resolution contract. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |
@@ -49,6 +49,27 @@ steps:
 Triggers, job dependencies, checkout revisions, services, generation checks,
 artifact production, and deployment remain in each application repository.
 Do not pass arbitrary shell commands into these actions or inherit every secret.
+
+### Image resolution contract
+
+`resolve-image` requires Docker CLI and Engine 28.1+ (API 1.49+) for
+platform-specific image inspection, plus Bash and jq. It pulls and inspects the
+same digest with an explicit `platform`, including when other architectures are
+already cached. Image contents are never executed, so cross-platform resolution
+does not require emulation.
+
+`image` is a lowercase repository without a tag or digest and must include `/`.
+Registry names use hostname labels with an optional numeric port. Repository
+components start and end with letters or digits; separators are a single dot,
+one or two underscores, or one or more dashes. The normalized repository name
+must not exceed 255 characters.
+
+Docker Hub references are normalized before any registry call: `library/alpine`
+becomes `docker.io/library/alpine`, `index.docker.io` becomes `docker.io`, and
+`docker.io/alpine` becomes `docker.io/library/alpine`. Other registries, including
+`localhost` with an optional port, are unchanged. Missing-tag detection matches
+Buildx's exact diagnostic for this normalized reference; other errors fail even
+with `allow-missing: 'true'`.
 
 ### Terraform contract
 
@@ -274,7 +295,7 @@ second group is reviewed manually, so check each entry when bumping anything nea
 
 | Pin | Location | Updated by |
 | --- | --- | --- |
-| `actions/*` (including `actions/cache`), `golangci-lint-action`, `zizmor-action`, `setup-terraform`, `setup-tflint` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
+| `actions/*` (including `actions/cache`), `golangci-lint-action`, `zizmor-action`, `setup-buildx-action`, `setup-terraform`, `setup-tflint` | `*/action.yml`, `.github/workflows/ci.yml` | Dependabot (github-actions) |
 | Commitizen and its transitive dependencies | `scripts/commitizen-requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | Test dependencies | `tests/requirements.in` → `.txt` | Dependabot (pip, pip-compile format) |
 | golangci-lint engine | `go-quality/action.yml` (`version`) | manual; [releases](https://github.com/golangci/golangci-lint/releases) |
@@ -282,6 +303,7 @@ second group is reviewed manually, so check each entry when bumping anything nea
 | Actionlint tarball and checksum | `scripts/automation-quality` | manual; [releases](https://github.com/rhysd/actionlint/releases) (`*_checksums.txt`) |
 | ShellCheck tarball and checksum | `scripts/automation-quality` | manual; [releases](https://github.com/koalaman/shellcheck/releases) |
 | Zizmor engine | `automation-quality/action.yml` (`version`) | manual; [releases](https://github.com/zizmorcore/zizmor/releases) |
+| Buildx engine | `resolve-image/action.yml` (`version`) | manual; [releases](https://github.com/docker/buildx/releases); re-verify the exact missing-tag diagnostic when updating |
 | Semgrep image tag and digest | `scripts/semgrep` | manual; [Docker Hub](https://hub.docker.com/r/semgrep/semgrep/tags) |
 | Terraform default version | `scripts/terraform-version` (`default`) | manual; [releases](https://github.com/hashicorp/terraform/releases) |
 | TFLint version and checksums | `terraform-quality/action.yml` (`tflint_version`, `checksums` of the Linux AMD64 and ARM64 zips) | manual; [releases](https://github.com/terraform-linters/tflint/releases) (`checksums.txt`) |
@@ -299,6 +321,9 @@ changelog file), no-op behavior, stale source, reruns, and atomic-push races
 against temporary local Git remotes; Go-quality cache keys, save guards, and
 path discovery (including environment overrides); Semgrep rule-path validation and
 automation-lint file selection against fake `docker`/`shellcheck` executables;
+image resolution, Docker Hub normalization, exact missing-tag diagnostics,
+platform selection with a cached host variant, label checks and rejected inputs
+against a fake `docker` in `tests/test_resolve_image.py`;
 Terraform root selection and deduplication, symlink containment, hidden-root
 formatting, the plugin cache, test opt-in, CLI version reuse, recovery policies,
 unique recovery names, plan exit codes, saved-plan apply and temporary-plan
