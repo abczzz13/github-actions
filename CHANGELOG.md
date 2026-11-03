@@ -1,3 +1,9 @@
+## 2.1.0 (2026-11-03)
+
+### Feat
+
+- **resolve-image**: resolve and verify registry images by digest (#16)
+
 ## 2.0.0 (2026-10-31)
 
 ### Feat
