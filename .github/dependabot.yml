@@ -9,6 +9,7 @@ updates:
       - /semgrep
       - /commit-policy
       - /commitizen-bump
+      - /resolve-image
       - /terraform-quality
       - /terraform-plan
       - /terraform-apply
