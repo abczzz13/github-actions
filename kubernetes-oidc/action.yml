@@ -1,0 +1,32 @@
+name: Kubernetes OIDC kubeconfig
+description: Write a kubeconfig that authenticates to a Kubernetes API server with fresh GitHub Actions ID tokens.
+inputs:
+  server:
+    description: API server URL, such as https://api.example.com:6443. Must use HTTPS.
+    required: true
+  certificate-authority-data:
+    description: Base64-encoded PEM CA bundle that verifies the API server certificate. Not a secret.
+    required: true
+  audience:
+    description: ID token audience that the API server's JWT authenticator accepts.
+    required: true
+  namespace:
+    description: Default namespace of the kubeconfig context. Empty leaves it unset.
+    default: ""
+outputs:
+  kubeconfig:
+    description: Path of the written kubeconfig. The action also sets KUBECONFIG for later steps.
+    value: ${{ steps.kubeconfig.outputs.kubeconfig }}
+runs:
+  using: composite
+  steps:
+    - name: Write OIDC kubeconfig
+      id: kubeconfig
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SERVER: ${{ inputs.server }}
+        CA_DATA: ${{ inputs.certificate-authority-data }}
+        AUDIENCE: ${{ inputs.audience }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: '"$ACTION_PATH/../scripts/kubernetes-oidc"'
