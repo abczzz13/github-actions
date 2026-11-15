@@ -25,6 +25,7 @@ explicit timeouts and read-only `contents` permissions unless a job publishes.
 | `commit-policy` | Checks `message`, or HEAD's commit message when omitted, using the same Commitizen version as the bump action. The caller checks PR titles on `edited` as well as normal PR events. |
 | `commitizen-bump` | Requires `token` and `validated-sha`; optional `branch` defaults to `main`. Outputs `created`, `version`, `tag`, and `sha`. See release safety below. |
 | `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Requires Docker CLI and Engine 28.1+ (API 1.49+). Installs the pinned buildx without selecting a builder or starting a separate BuildKit container. See the image resolution contract. |
+| `kubernetes-oidc` | Writes a kubeconfig for `server` and `certificate-authority-data` whose exec credential requests a fresh GitHub Actions ID token for `audience` when the previous one is about to expire. Optional `namespace` sets the context namespace. Sets `KUBECONFIG` for later steps and outputs `kubeconfig`. Requires `id-token: write`, curl, jq and Python 3 with SSL support. See the Kubernetes OIDC contract. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |
@@ -70,6 +71,60 @@ becomes `docker.io/library/alpine`, `index.docker.io` becomes `docker.io`, and
 `localhost` with an optional port, are unchanged. Missing-tag detection matches
 Buildx's exact diagnostic for this normalized reference; other errors fail even
 with `allow-missing: 'true'`.
+
+### Kubernetes OIDC contract
+
+`kubernetes-oidc` only authenticates. The API server must trust
+`https://token.actions.githubusercontent.com` for `audience` through its JWT
+authenticator, and RBAC decides what the resulting identity may do. The
+username comes from the cluster's claim mapping, not from this action.
+
+- The kubeconfig holds no token. Its exec credential plugin, shipped with the
+  action, requests a new ID token on each call and sets `expirationTimestamp`
+  30 seconds before the token's `exp`. A long `helm --wait` therefore keeps
+  working after the first token expires. Each `kubectl` or `helm` process
+  requests its own token, so a job that loops many short calls sends as many
+  token requests.
+- The plugin retries a failed token request three times. It passes the job's
+  ID token request token to curl on stdin, never on its command line, because
+  that token can mint ID tokens for any audience.
+- The action requests one token up front, so a missing `id-token: write`
+  permission or an unreachable token service fails this step. It logs the
+  token's `sub`, `job_workflow_ref` and lifetime, never the token.
+- The kubeconfig is written with mode `0600` under `RUNNER_TEMP`. It replaces
+  `KUBECONFIG` for later steps of the job. The cluster, user and context names
+  are always `kubernetes` and `github-actions`, so do not merge two of these
+  kubeconfigs in one `KUBECONFIG` list: their entries clash and the first one
+  wins. Run the action again to switch clusters.
+- Inputs are checked before a token is requested: `server` must be an `https://`
+  URL with a host and a valid optional port, without credentials, query or
+  fragment, and a bracketed host must be an IPv6 address. `kubectl` reports
+  other URL errors on its first call. Python 3's SSL library parses the
+  base64-encoded PEM certificates in `certificate-authority-data`.
+  `audience` must be at most 255 of `A-Za-z0-9._:/-`, and `namespace` empty or a
+  valid namespace name.
+- `job_workflow_ref` names the workflow file that runs the job. Inside a
+  reusable workflow that is the reusable workflow, not its caller, so write the
+  cluster's claim rules to match. Network access to the API server, for
+  example through a VPN, is the caller's job and comes in an earlier step.
+
+```yaml
+deploy:
+  runs-on: ubuntu-24.04
+  timeout-minutes: 20
+  environment: test
+  permissions:
+    contents: read
+    id-token: write
+  steps:
+    - uses: abczzz13/github-actions/kubernetes-oidc@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+      with:
+        server: ${{ vars.KUBERNETES_SERVER }}
+        certificate-authority-data: ${{ vars.KUBERNETES_CA_DATA }}
+        audience: infra-k8s-apps
+        namespace: app-test
+    - run: helm upgrade --install app ./deploy/chart --atomic --wait --timeout 15m
+```
 
 ### Terraform contract
 
@@ -324,6 +379,13 @@ automation-lint file selection against fake `docker`/`shellcheck` executables;
 image resolution, Docker Hub normalization, exact missing-tag diagnostics,
 platform selection with a cached host variant, label checks and rejected inputs
 against a fake `docker` in `tests/test_resolve_image.py`;
+kubeconfig contents and file mode, the up-front token request, exec credentials
+and their early expiry, base64url claims, audience encoding, a retried token
+request, the request token kept off curl's command line, token-service and
+token errors, parsed URLs and PEM bundles, and rejected inputs against a local
+fake token service, plus real `kubectl` sending the plugin's token to a local
+HTTPS server and renewing credentials in one proxy process after early expiry
+(skipped without `kubectl` or `openssl`) in `tests/test_kubernetes_oidc.py`;
 Terraform root selection and deduplication, symlink containment, hidden-root
 formatting, the plugin cache, test opt-in, CLI version reuse, recovery policies,
 unique recovery names, plan exit codes, saved-plan apply and temporary-plan

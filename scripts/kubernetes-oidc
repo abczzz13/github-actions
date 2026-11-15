@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+# Every input is checked before a token is requested.
+python3 - <<'PY'
+import base64
+import ipaddress
+import os
+import ssl
+import sys
+from urllib.parse import urlsplit
+
+# Check only what kubectl would accept silently: plain HTTP, credentials in
+# the URL, a query or fragment, and a bracketed host that is not IPv6. Older
+# Pythons do not check the bracketed host, so check it here. kubectl reports
+# other URL errors on its first call.
+server = os.environ.get("SERVER", "")
+try:
+    url = urlsplit(server)
+    url.port  # Raises ValueError for a port that is not a number in range.
+    if url.netloc.rpartition("@")[2].startswith("[") and ipaddress.ip_address(url.hostname or "").version != 6:
+        raise ValueError("bracketed host is not IPv6")
+    if url.scheme != "https" or not url.hostname or "@" in url.netloc or any(char in server for char in "?#"):
+        raise ValueError("invalid URL")
+except ValueError:
+    sys.exit("server must be an https:// URL with a host, without credentials, query or fragment.")
+
+try:
+    # Match kubeconfig base64 decoding, which permits CR and LF but not other whitespace.
+    encoded = os.environ.get("CA_DATA", "").replace("\r", "").replace("\n", "")
+    pem = base64.b64decode(encoded, validate=True).decode("ascii")
+    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=pem)
+except (ValueError, ssl.SSLError):
+    sys.exit("certificate-authority-data must be a base64-encoded PEM certificate bundle.")
+PY
+[[ "${AUDIENCE:-}" =~ ^[A-Za-z0-9._:/-]{1,255}$ ]] ||
+    fail "Audience '${AUDIENCE:-}' may contain only letters, digits and ._:/- (at most 255)."
+[[ -z "${NAMESPACE:-}" || ( ${#NAMESPACE} -le 63 && "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ) ]] ||
+    fail "Namespace '${NAMESPACE:-}' is not a valid Kubernetes namespace name."
+[[ -n "${RUNNER_TEMP:-}" && -n "${GITHUB_ENV:-}" && -n "${GITHUB_OUTPUT:-}" ]] ||
+    fail 'RUNNER_TEMP, GITHUB_ENV and GITHUB_OUTPUT must be set.'
+
+scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+credential="$scripts/kubernetes-oidc-credential"
+
+# Request one token now, so a missing id-token permission or an unreachable
+# token service fails here rather than in the first kubectl or helm call.
+# The token is never printed; only non-secret claims are logged.
+exec_credential=$("$credential" "$AUDIENCE")
+jq -L "$scripts" -r 'include "kubernetes-oidc-jwt";
+    .status.token | jwt_claims
+    | "ID token: sub=\(.sub // "-") job_workflow_ref=\(.job_workflow_ref // "-") lifetime=\((.exp // 0) - (.iat // 0))s"
+' <<<"$exec_credential" || fail 'Reading the ID token claims failed.'
+
+directory=$(mktemp -d "$RUNNER_TEMP/kubernetes-oidc.XXXXXXXX")
+kubeconfig="$directory/config"
+(
+    umask 077
+    jq -n --arg server "$SERVER" --arg ca "$CA_DATA" --arg command "$credential" \
+        --arg audience "$AUDIENCE" --arg namespace "${NAMESPACE:-}" '
+        {apiVersion: "v1", kind: "Config",
+         clusters: [{name: "kubernetes", cluster: {server: $server, "certificate-authority-data": $ca}}],
+         users: [{name: "github-actions", user: {exec: {
+             apiVersion: "client.authentication.k8s.io/v1", command: $command, args: [$audience],
+             interactiveMode: "Never", provideClusterInfo: false}}}],
+         contexts: [{name: "github-actions", context: ({cluster: "kubernetes", user: "github-actions"}
+             + (if $namespace == "" then {} else {namespace: $namespace} end))}],
+         "current-context": "github-actions"}' >"$kubeconfig"
+)
+echo "KUBECONFIG=$kubeconfig" >>"$GITHUB_ENV"
+echo "kubeconfig=$kubeconfig" >>"$GITHUB_OUTPUT"
+echo "Wrote $kubeconfig for $SERVER."
