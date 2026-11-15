@@ -1,3 +1,9 @@
+## 2.2.0 (2026-11-15)
+
+### Feat
+
+- **kubernetes-oidc**: write a kubeconfig that uses GitHub OIDC tokens (#17)
+
 ## 2.1.0 (2026-11-03)
 
 ### Feat
