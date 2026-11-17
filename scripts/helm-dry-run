@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Checks a Helm release against the live cluster without installing it or
+# changing live objects:
+#
+# 1. helm upgrade --install --take-ownership --dry-run=server renders the
+#    chart, validates it against the cluster's OpenAPI schema and reads the
+#    existing objects. It returns before it sends any object, so it neither
+#    runs hooks nor checks admission or write access. --take-ownership accepts
+#    objects that another tool, such as Flux, created without Helm metadata.
+# 2. kubectl diff --server-side --force-conflicts --field-manager=helm sends the
+#    rendered objects without hooks with dryRun=All. This checks admission and
+#    patch access and lists the differences from the live objects. Forcing
+#    conflicts shows what a real Helm server-side apply would take over.
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+name='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+[[ ${#RELEASE} -le 53 && "${RELEASE:-}" =~ $name ]] || fail "Release '${RELEASE:-}' is not a valid Helm release name."
+[[ ${#NAMESPACE} -le 63 && "${NAMESPACE:-}" =~ $name ]] ||
+    fail "Namespace '${NAMESPACE:-}' is not a valid Kubernetes namespace name."
+[[ -n "${CHART:-}" && -f "$CHART/Chart.yaml" ]] || fail "No Helm chart at '${CHART:-}'."
+[[ -n "${GITHUB_STEP_SUMMARY:-}" && -n "${GITHUB_OUTPUT:-}" ]] || fail 'GITHUB_STEP_SUMMARY and GITHUB_OUTPUT must be set.'
+
+args=("$RELEASE" "$CHART" --namespace "$NAMESPACE")
+while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ -f "$file" ]] || fail "Values file '$file' does not exist."
+    args+=(--values "$file")
+done <<<"${VALUES:-}"
+# Helm splits --set-string on commas, so a value may not contain one.
+while IFS= read -r value; do
+    [[ -n "$value" ]] || continue
+    [[ "$value" =~ ^[A-Za-z0-9_.-]+=[^,]*$ ]] || fail "set-string entry '$value' must be key=value without commas."
+    args+=(--set-string "$value")
+done <<<"${SET_STRING:-}"
+
+installed=$(helm version --template '{{ .Version }}') || fail 'Helm is not installed. Run setup-helm first.'
+[[ "$installed" == v4.* ]] || fail "Helm 4 is required, found $installed."
+
+# Capture the release privately: --hide-secret would remove Secrets from the
+# manifest and skip their admission checks. The release manifest excludes hooks.
+# Do not render again: upgrade state, lookups and cluster capabilities must match.
+umask 077
+directory=$(mktemp -d)
+trap 'rm -rf "$directory"' EXIT
+rendered="$directory/manifest.yaml"
+# Never remove --dry-run here. A real install is a separate, reviewed change.
+helm upgrade --install "${args[@]}" --take-ownership --dry-run=server --output json >"$directory/release.json"
+jq -je '.manifest | strings' "$directory/release.json" >"$rendered" || fail 'Helm returned no release manifest.'
+
+# kubectl diff exits 1 when it finds differences and above 1 on errors.
+status=0
+changes=$(kubectl diff --namespace "$NAMESPACE" --server-side --force-conflicts \
+    --field-manager=helm --show-secrets=false --filename "$rendered") || status=$?
+((status <= 1)) || fail "Server-side dry run failed (kubectl diff exit $status)."
+[[ -z "$changes" ]] || echo "$changes"
+
+if ((status == 0)); then changed=false; else changed=true; fi
+echo "changed=$changed" >>"$GITHUB_OUTPUT"
+{
+    echo "**Server dry run of \`$RELEASE\` in \`$NAMESPACE\` passed. No Helm release installed and no live objects changed.**"
+    echo
+    if [[ "$changed" == false ]]; then
+        echo 'The chart matches the live objects.'
+    else
+        echo '<details><summary>Differences from the live objects</summary>'
+        echo
+        echo '```diff'
+        echo "$changes"
+        echo '```'
+        echo
+        echo '</details>'
+    fi
+} >>"$GITHUB_STEP_SUMMARY"

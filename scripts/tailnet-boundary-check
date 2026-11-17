@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Checks that the joined tailnet identity reaches the Kubernetes API and
+# nothing else. Tailscale also lists peers that may reach this runner, such as
+# operators' devices, so a visible peer is not necessarily reachable: every
+# peer is probed.
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+ports='^[0-9]{1,5}( [0-9]{1,5})*$'
+[[ "${CONTROL_PLANE_TAG:-}" =~ ^tag:[A-Za-z0-9-]+$ ]] ||
+    fail "control-plane-tag '${CONTROL_PLANE_TAG:-}' must be a Tailscale tag, such as tag:k8s-controlplane."
+[[ "${CONTROL_PLANE_PORT:-}" =~ ^[0-9]{1,5}$ ]] || fail "control-plane-port '${CONTROL_PLANE_PORT:-}' is not a port."
+[[ "${CONTROL_PLANE_DENIED_PORTS:-}" =~ $ports ]] ||
+    fail 'control-plane-denied-ports must be space-separated ports.'
+[[ "${PEER_DENIED_PORTS:-}" =~ $ports ]] || fail 'peer-denied-ports must be space-separated ports.'
+read -ra control_plane_denied <<<"$CONTROL_PLANE_DENIED_PORTS"
+read -ra peer_denied <<<"$PEER_DENIED_PORTS"
+for port in "$CONTROL_PLANE_PORT" "${control_plane_denied[@]}" "${peer_denied[@]}"; do
+    ((10#$port >= 1 && 10#$port <= 65535)) || fail "Port '$port' must be between 1 and 65535."
+done
+# Use decimal ports even when an input has leading zeroes.
+CONTROL_PLANE_PORT=$((10#$CONTROL_PLANE_PORT))
+
+tcp_open() {
+    # The child Bash expands its positional arguments, not the parent shell.
+    # shellcheck disable=SC2016
+    timeout 5 bash -c '>/dev/tcp/"$1"/"$2"' bash "$1" "$((10#$2))" 2>/dev/null
+}
+
+peers=$(tailscale status --json | jq -c --arg tag "$CONTROL_PLANE_TAG" '
+    [(.Peer // {})[] | {name: (.DNSName // ""), ips: (.TailscaleIPs // []),
+        kind: (if (.Tags // []) == [$tag] then "controlplane" else "other" end)}]
+') || fail 'Reading tailscale status failed.'
+jq -e 'any(.[]; .kind == "controlplane" and (.ips | length) > 0)' <<<"$peers" >/dev/null ||
+    fail "No $CONTROL_PLANE_TAG peer is visible; the Kubernetes API is unreachable."
+
+# Read JSON records, not tab-separated fields: Bash read collapses empty fields.
+while IFS= read -r peer; do
+    kind=$(jq -r '.kind' <<<"$peer")
+    name=$(jq -r '.name | if . == "" then "unnamed peer" else . end' <<<"$peer")
+    mapfile -t ips < <(jq -r '.ips[]' <<<"$peer")
+    if ((${#ips[@]} == 0)); then
+        echo "$name: no Tailscale IP, not probed."
+        continue
+    fi
+    if [[ "$kind" == controlplane ]]; then
+        denied=("${control_plane_denied[@]}")
+    else
+        denied=("${peer_denied[@]}")
+    fi
+    open=false
+    for ip in "${ips[@]}"; do
+        # A control plane needs one working API address. Denied ports must be
+        # closed on every IPv4 and IPv6 address, including unused API addresses.
+        if [[ "$kind" == controlplane && "$open" == false ]]; then
+            for attempt in 1 2 3; do
+                if tcp_open "$ip" "$CONTROL_PLANE_PORT"; then open=true; break; fi
+                ((attempt == 3)) || sleep 2
+            done
+        fi
+        for port in "${denied[@]}"; do
+            if tcp_open "$ip" "$port"; then fail "$name ($ip) is reachable on TCP $port."; fi
+        done
+    done
+    note=''
+    if [[ "$kind" == controlplane ]]; then
+        [[ "$open" == true ]] || fail "Control plane $name (${ips[*]}) is not reachable on TCP $CONTROL_PLANE_PORT."
+        note="; $CONTROL_PLANE_PORT reachable"
+    fi
+    echo "$name: TCP ${denied[*]} denied$note."
+done < <(jq -c '.[]' <<<"$peers")

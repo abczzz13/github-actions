@@ -423,6 +423,17 @@ class TerraformTests(unittest.TestCase):
         self.assertEqual(upload["with"]["retention-days"], 3)
         self.assertIs(upload["with"]["overwrite"], False)
 
+    def test_hosted_recovery_verifies_artifacts_without_ignoring_api_errors(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        job = workflow["jobs"]["terraform-recovery"]
+        self.assertEqual(job["permissions"], {"contents": "read", "actions": "read"})
+        verify = next(step for step in job["steps"]
+                      if step.get("run") == "python3 tests/verify_terraform_recovery_artifact.py")
+        self.assertNotIn("continue-on-error", verify)
+        self.assertEqual(verify["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(verify["env"]["ARTIFACT"], "${{ steps.recovery.outputs.errored-state-artifact }}")
+        self.assertEqual(verify["env"]["FAILURE"], "${{ matrix.failure }}")
+
     def test_release_waits_for_all_consumer_jobs(self):
         workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
         self.assertEqual(

@@ -18,7 +18,7 @@ def go_quality_steps():
 class ActionTests(unittest.TestCase):
     def test_actions_are_self_contained_and_sha_pinned(self):
         actions = sorted(ROOT.glob("*/action.yml"))
-        self.assertEqual(len(actions), 11)
+        self.assertEqual(len(actions), 15)
         for path in actions:
             with self.subTest(action=path.parent.name):
                 action = yaml.safe_load(path.read_text())
@@ -34,6 +34,13 @@ class ActionTests(unittest.TestCase):
                             shell.write(script)
                             shell.flush()
                             subprocess.run(["shellcheck", "--shell=bash", shell.name], check=True)
+
+    def test_setup_helm_outputs_the_installed_version(self):
+        action = yaml.safe_load((ROOT / "setup-helm/action.yml").read_text())
+        (step,) = action["runs"]["steps"]
+        self.assertTrue(step["uses"].startswith("azure/setup-helm@"))
+        self.assertRegex(step["with"]["version"], r"^v4\.\d+\.\d+$")
+        self.assertEqual(action["outputs"]["version"]["value"], step["with"]["version"])
 
     def test_ci_separates_events_and_checks_pr_titles(self):
         # BaseLoader preserves GitHub's "on" key rather than YAML 1.1's boolean.
@@ -52,6 +59,9 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(policy["if"], "github.event_name == 'pull_request'")
         self.assertEqual(policy["with"]["message"], "${{ github.event.pull_request.title }}")
         self.assertIn("automation", workflow["jobs"]["release"]["needs"])
+        helm_index = next(index for index, step in enumerate(steps) if step.get("uses") == "./setup-helm")
+        tests_index = next(index for index, step in enumerate(steps) if "unittest discover" in step.get("run", ""))
+        self.assertLess(helm_index, tests_index)
 
     def test_go_quality_disables_builtin_caching(self):
         steps = go_quality_steps()
