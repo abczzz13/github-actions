@@ -18,9 +18,13 @@ USER = "github:repo:owner@1/app@2:environment:test"
 
 def listener(address):
     """A listening socket accepts TCP connections without calling accept()."""
-    sock = socket.socket()
-    sock.bind((address, 0))
-    sock.listen()
+    sock = socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET)
+    try:
+        sock.bind((address, 0))
+        sock.listen()
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -29,6 +33,7 @@ class BoundaryTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.bin = Path(self.directory.name)
         self.sockets = []
+        self.calls = self.bin / "tailscale.calls"
         # The control plane and an operator device, on separate loopback addresses.
         self.api = self.listen("127.0.0.2")
         self.closed = self.free_port("127.0.0.2")
@@ -43,6 +48,12 @@ class BoundaryTests(unittest.TestCase):
         self.sockets.append(sock)
         return sock.getsockname()[1]
 
+    def listen_ipv6(self):
+        try:
+            return self.listen("::1")
+        except OSError as error:
+            self.skipTest(f"IPv6 loopback is unavailable: {error}")
+
     def free_port(self, address):
         sock = listener(address)
         port = sock.getsockname()[1]
@@ -51,7 +62,8 @@ class BoundaryTests(unittest.TestCase):
 
     def check(self, peers, **overrides):
         status = {"Peer": {str(index): peer for index, peer in enumerate(peers)}}
-        write_executable(self.bin / "tailscale", f"cat <<'JSON'\n{json.dumps(status)}\nJSON")
+        self.calls.write_text("")
+        write_executable(self.bin / "tailscale", f"echo called >> '{self.calls}'\ncat <<'JSON'\n{json.dumps(status)}\nJSON")
         env = os.environ | {
             "PATH": f"{self.bin}:{os.environ['PATH']}", "CONTROL_PLANE_TAG": TAG,
             "CONTROL_PLANE_PORT": str(self.api), "CONTROL_PLANE_DENIED_PORTS": str(self.closed),
@@ -60,7 +72,7 @@ class BoundaryTests(unittest.TestCase):
         return subprocess.run([str(BOUNDARY)], env=env, capture_output=True, text=True, timeout=60)
 
     def control_plane(self, address="127.0.0.2"):
-        return {"DNSName": "cp-1.", "Tags": [TAG], "TailscaleIPs": [address, "fd7a::1"]}
+        return {"DNSName": "cp-1.", "Tags": [TAG], "TailscaleIPs": [address]}
 
     def test_accepts_a_reachable_control_plane_and_closed_peers(self):
         device = {"DNSName": "laptop.", "TailscaleIPs": ["127.0.0.3"]}
@@ -90,6 +102,66 @@ class BoundaryTests(unittest.TestCase):
         result = self.check([self.control_plane()], CONTROL_PLANE_PORT=str(self.closed))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"is not reachable on TCP {self.closed}.", result.stderr)
+
+    def test_probes_peers_without_a_dns_name(self):
+        open_port = self.listen("127.0.0.3")
+        for name in ("", None):
+            with self.subTest(name=name):
+                device = {"DNSName": name, "TailscaleIPs": ["127.0.0.3"]}
+                result = self.check([self.control_plane(), device], PEER_DENIED_PORTS=str(open_port))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"unnamed peer (127.0.0.3) is reachable on TCP {open_port}", result.stderr)
+
+    def test_accepts_a_control_plane_without_a_dns_name(self):
+        node = self.control_plane() | {"DNSName": ""}
+        result = self.check([node])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{self.api} reachable", result.stdout)
+
+    def test_rejects_a_peer_reachable_only_on_its_second_ipv6_address(self):
+        open_port = self.listen_ipv6()
+        device = {"DNSName": "dual-stack.", "TailscaleIPs": ["127.0.0.3", "::1"]}
+        result = self.check([self.control_plane(), device], PEER_DENIED_PORTS=str(open_port))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"dual-stack. (::1) is reachable on TCP {open_port}", result.stderr)
+
+    def test_rejects_a_control_plane_admin_port_on_its_second_ipv6_address(self):
+        open_port = self.listen_ipv6()
+        node = self.control_plane() | {"TailscaleIPs": ["127.0.0.2", "::1"]}
+        result = self.check([node], CONTROL_PLANE_DENIED_PORTS=str(open_port))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"cp-1. (::1) is reachable on TCP {open_port}", result.stderr)
+
+    def test_accepts_an_ipv6_only_control_plane(self):
+        api = self.listen_ipv6()
+        result = self.check([self.control_plane("::1")], CONTROL_PLANE_PORT=str(api))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_control_plane_needs_only_one_working_api_address(self):
+        self.listen_ipv6()
+        node = self.control_plane() | {"TailscaleIPs": ["::1", "127.0.0.2"]}
+        result = self.check([node])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{self.api} reachable", result.stdout)
+
+    def test_rejects_out_of_range_ports_before_reading_tailscale(self):
+        for name in ("CONTROL_PLANE_PORT", "CONTROL_PLANE_DENIED_PORTS", "PEER_DENIED_PORTS"):
+            for value in ("0", "00000", "65536", "99999"):
+                with self.subTest(name=name, value=value):
+                    result = self.check([self.control_plane()], **{name: value})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("must be between 1 and 65535", result.stderr)
+                    self.assertEqual(self.calls.read_text(), "")
+        result = self.check([self.control_plane()], PEER_DENIED_PORTS="22 99999")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text(), "")
+
+    def test_accepts_range_endpoints_and_leading_zeroes(self):
+        # No peer is needed to check input validation; status must still be read.
+        result = self.check([], CONTROL_PLANE_PORT="00001", PEER_DENIED_PORTS="00022 65535")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No tag:k8s-controlplane peer is visible", result.stderr)
+        self.assertEqual(self.calls.read_text(), "called\n")
 
     def test_a_node_with_extra_tags_is_not_a_control_plane(self):
         node = self.control_plane() | {"Tags": [TAG, "tag:other"]}

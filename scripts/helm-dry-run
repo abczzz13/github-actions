@@ -23,13 +23,6 @@ name='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 [[ ${#NAMESPACE} -le 63 && "${NAMESPACE:-}" =~ $name ]] ||
     fail "Namespace '${NAMESPACE:-}' is not a valid Kubernetes namespace name."
 [[ -n "${CHART:-}" && -f "$CHART/Chart.yaml" ]] || fail "No Helm chart at '${CHART:-}'."
-kube_version=''
-if [[ -n "${KUBE_VERSION_FILE:-}" ]]; then
-    [[ -f "$KUBE_VERSION_FILE" ]] || fail "kube-version-file '$KUBE_VERSION_FILE' does not exist."
-    kube_version=$(tr -d '\r\n' <"$KUBE_VERSION_FILE")
-    [[ "$kube_version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-        fail "kube-version-file must hold one Kubernetes version, such as 1.35.0, got '$kube_version'."
-fi
 [[ -n "${GITHUB_STEP_SUMMARY:-}" && -n "${GITHUB_OUTPUT:-}" ]] || fail 'GITHUB_STEP_SUMMARY and GITHUB_OUTPUT must be set.'
 
 args=("$RELEASE" "$CHART" --namespace "$NAMESPACE")
@@ -48,19 +41,21 @@ done <<<"${SET_STRING:-}"
 installed=$(helm version --template '{{ .Version }}') || fail 'Helm is not installed. Run setup-helm first.'
 [[ "$installed" == v4.* ]] || fail "Helm 4 is required, found $installed."
 
+# Capture the release privately: --hide-secret would remove Secrets from the
+# manifest and skip their admission checks. The release manifest excludes hooks.
+# Do not render again: upgrade state, lookups and cluster capabilities must match.
+umask 077
+directory=$(mktemp -d)
+trap 'rm -rf "$directory"' EXIT
+rendered="$directory/manifest.yaml"
 # Never remove --dry-run here. A real install is a separate, reviewed change.
-helm upgrade --install "${args[@]}" --take-ownership --dry-run=server --hide-secret
-
-template=("${args[@]}" --no-hooks)
-[[ -z "$kube_version" ]] || template+=(--kube-version "$kube_version")
-rendered=$(mktemp)
-trap 'rm -f "$rendered"' EXIT
-helm template "${template[@]}" >"$rendered"
+helm upgrade --install "${args[@]}" --take-ownership --dry-run=server --output json >"$directory/release.json"
+jq -je '.manifest | strings' "$directory/release.json" >"$rendered" || fail 'Helm returned no release manifest.'
 
 # kubectl diff exits 1 when it finds differences and above 1 on errors.
 status=0
 changes=$(kubectl diff --namespace "$NAMESPACE" --server-side --force-conflicts \
-    --field-manager=helm --filename "$rendered") || status=$?
+    --field-manager=helm --show-secrets=false --filename "$rendered") || status=$?
 ((status <= 1)) || fail "Server-side dry run failed (kubectl diff exit $status)."
 [[ -z "$changes" ]] || echo "$changes"
 

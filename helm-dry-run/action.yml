@@ -17,7 +17,8 @@ inputs:
     description: Newline-separated key=value pairs passed as --set-string, applied after the values files. Values may not contain commas.
     default: ""
   kube-version-file:
-    description: File holding the Kubernetes version, such as 1.35.0, for the offline render that is diffed. Empty uses Helm's default.
+    description: Deprecated compatibility input. Ignored; the server dry run uses the live cluster version.
+    deprecationMessage: Remove kube-version-file. The diff now uses the server dry-run manifest without an offline render.
     default: ""
 outputs:
   changed:
@@ -36,5 +37,4 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         VALUES: ${{ inputs.values }}
         SET_STRING: ${{ inputs.set-string }}
-        KUBE_VERSION_FILE: ${{ inputs.kube-version-file }}
       run: '"$ACTION_PATH/../scripts/helm-dry-run"'

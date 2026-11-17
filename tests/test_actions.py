@@ -59,6 +59,9 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(policy["if"], "github.event_name == 'pull_request'")
         self.assertEqual(policy["with"]["message"], "${{ github.event.pull_request.title }}")
         self.assertIn("automation", workflow["jobs"]["release"]["needs"])
+        helm_index = next(index for index, step in enumerate(steps) if step.get("uses") == "./setup-helm")
+        tests_index = next(index for index, step in enumerate(steps) if "unittest discover" in step.get("run", ""))
+        self.assertLess(helm_index, tests_index)
 
     def test_go_quality_disables_builtin_caching(self):
         steps = go_quality_steps()

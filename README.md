@@ -29,7 +29,7 @@ explicit timeouts and read-only `contents` permissions unless a job publishes.
 | `resolve-release` | Resolves an unprefixed semantic release `tag` (such as `1.2.3`) to its commit and requires that commit on the history of `reviewed-sha` (default: the workflow commit). Outputs `sha` and `version`. The caller checks out with `fetch-depth: 0`. Branches with a release-like name never stand in for the tag. |
 | `tailnet-kubernetes-access` | Joins a tailnet with Tailscale workload identity, checks the network boundary, writes a `kubernetes-oidc` kubeconfig and checks the Kubernetes user. Outputs `kubeconfig` and sets `KUBECONFIG`. Requires `id-token: write`. See the tailnet Kubernetes access contract. |
 | `setup-helm` | Installs the shared Helm version and outputs it as `version`. Consumers that pin this repository at one SHA therefore use one Helm; compare a Nix or local Helm with `version` in CI. |
-| `helm-dry-run` | Checks a Helm release against the live cluster without installing it: `helm upgrade --install --take-ownership --dry-run=server`, then `kubectl diff --server-side --force-conflicts --field-manager=helm` of the rendered objects without hooks. Takes `release`, `chart`, `namespace`, newline-separated `values` files and `set-string` pairs (no commas), and an optional `kube-version-file` holding the Kubernetes version for the offline render. Outputs `changed` and writes the differences to the job summary. Requires Helm 4 (run `setup-helm` first), kubectl and a kubeconfig. |
+| `helm-dry-run` | Checks a Helm release against the live cluster without installing it: `helm upgrade --install --take-ownership --dry-run=server`, then `kubectl diff --server-side --force-conflicts --field-manager=helm` of that exact server-rendered manifest without hooks. Takes `release`, `chart`, `namespace`, newline-separated `values` files and `set-string` pairs (no commas). The deprecated `kube-version-file` input is ignored; rendering uses the live cluster version. Outputs `changed` and writes the differences to the job summary. Requires Helm 4 (run `setup-helm` first), kubectl, jq and a kubeconfig. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |
@@ -142,8 +142,10 @@ a later step:
    `tailscale-tags`. The caller grants `id-token: write`.
 2. Checks the network boundary. At least one peer must carry exactly the tag
    `control-plane-tag`. Every control plane must accept TCP
-   `control-plane-port` (three attempts) and refuse `control-plane-denied-ports`.
-   Every other visible peer must refuse `peer-denied-ports`. Tailscale also lists
+   `control-plane-port` on at least one address (three attempts per address) and
+   refuse `control-plane-denied-ports` on every IPv4 and IPv6 address.
+   Every other visible peer must refuse `peer-denied-ports` on every address.
+   Ports must be between 1 and 65535. Tailscale also lists
    peers that may only connect to the runner, such as operators' devices, so a
    visible peer is probed rather than assumed reachable. Peers without a
    Tailscale IP are logged and skipped.
@@ -185,7 +187,11 @@ of the job whose identity the cluster trusts; it is a composite action, so
 ```
 
 `helm-dry-run` never installs. Its server dry run does not run hooks, and the
-diff leaves hooks out, so a hook's prerequisites need their own check.
+diff leaves hooks out, so a hook's prerequisites need their own check. The diff
+uses the release manifest from that dry run, preserving upgrade state, cluster
+capabilities and `lookup` results. There is no second, offline render. The release
+JSON and manifest, including Secrets, stay in private temporary files that are
+removed on exit. `kubectl diff` hides Secret values in the log and job summary.
 
 ### Terraform contract
 
@@ -421,6 +427,8 @@ second group is reviewed manually, so check each entry when bumping anything nea
 | Zizmor engine | `automation-quality/action.yml` (`version`) | manual; [releases](https://github.com/zizmorcore/zizmor/releases) |
 | Buildx engine | `resolve-image/action.yml` (`version`) | manual; [releases](https://github.com/docker/buildx/releases); re-verify the exact missing-tag diagnostic when updating |
 | Semgrep image tag and digest | `scripts/semgrep` | manual; [Docker Hub](https://hub.docker.com/r/semgrep/semgrep/tags) |
+| Helm version | `setup-helm/action.yml` (`version` and output) | manual; [releases](https://github.com/helm/helm/releases) |
+| Tailscale client version | `tailnet-kubernetes-access/action.yml` (`tailscale-version`) | manual; [releases](https://github.com/tailscale/tailscale/releases) |
 | Terraform default version | `scripts/terraform-version` (`default`) | manual; [releases](https://github.com/hashicorp/terraform/releases) |
 | TFLint version and checksums | `terraform-quality/action.yml` (`tflint_version`, `checksums` of the Linux AMD64 and ARM64 zips) | manual; [releases](https://github.com/terraform-linters/tflint/releases) (`checksums.txt`) |
 | semgrep-rules revision | `semgrep/action.yml` (`ref`) | manual; [repository](https://github.com/semgrep/semgrep-rules) |
@@ -447,6 +455,13 @@ token errors, parsed URLs and PEM bundles, and rejected inputs against a local
 fake token service, plus real `kubectl` sending the plugin's token to a local
 HTTPS server and renewing credentials in one proxy process after early expiry
 (skipped without `kubectl` or `openssl`) in `tests/test_kubernetes_oidc.py`;
+release resolution against real Git tags in `tests/test_resolve_release.py`;
+network boundary checks against IPv4 and IPv6 loopback sockets, unnamed peers,
+and invalid port ranges in `tests/test_tailnet_kubernetes_access.py`;
+exact server-manifest reuse, private temporary files and cleanup on failure
+against fake tools in `tests/test_helm_dry_run.py`, plus real Helm 4 install and
+upgrade dry runs against a local API fixture in `tests/test_helm_integration.py`
+(skipped without Helm 4; schema, admission and real-cluster access are not tested);
 Terraform root selection and deduplication, symlink containment, hidden-root
 formatting, the plugin cache, test opt-in, CLI version reuse, recovery policies,
 unique recovery names, plan exit codes, saved-plan apply and temporary-plan
@@ -478,7 +493,8 @@ ShellCheck that automation-quality leaves on `PATH`, because Actionlint only
 parses workflows.
 
 Local validation requires Python 3.13+, Actionlint, and ShellCheck. Install a
-Terraform CLI as well to include the backend recovery integration test:
+Terraform CLI as well to include the backend recovery integration test, and
+Helm 4 to include the local API rendering integration test:
 
 ```nu
 python -m venv .venv
