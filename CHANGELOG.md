@@ -1,3 +1,9 @@
+## 2.3.0 (2026-11-17)
+
+### Feat
+
+- add shared app Deploy actions for release, access and Helm dry runs (#18)
+
 ## 2.2.0 (2026-11-15)
 
 ### Feat
