@@ -1,0 +1,13 @@
+name: Set up Helm
+description: Install the Helm version that consumers' chart checks and deployments share.
+outputs:
+  version:
+    description: Installed Helm version, such as v4.2.4. Compare a local or Nix-provided Helm with it.
+    # Keep equal to the version below; tests/test_actions.py checks this.
+    value: v4.2.4
+runs:
+  using: composite
+  steps:
+    - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      with:
+        version: v4.2.4

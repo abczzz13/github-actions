@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Checks that the joined tailnet identity reaches the Kubernetes API and
+# nothing else. Tailscale also lists peers that may reach this runner, such as
+# operators' devices, so a visible peer is not necessarily reachable: every
+# peer is probed.
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+ports='^[0-9]{1,5}( [0-9]{1,5})*$'
+[[ "${CONTROL_PLANE_TAG:-}" =~ ^tag:[A-Za-z0-9-]+$ ]] ||
+    fail "control-plane-tag '${CONTROL_PLANE_TAG:-}' must be a Tailscale tag, such as tag:k8s-controlplane."
+[[ "${CONTROL_PLANE_PORT:-}" =~ ^[0-9]{1,5}$ ]] || fail "control-plane-port '${CONTROL_PLANE_PORT:-}' is not a port."
+[[ "${CONTROL_PLANE_DENIED_PORTS:-}" =~ $ports ]] ||
+    fail 'control-plane-denied-ports must be space-separated ports.'
+[[ "${PEER_DENIED_PORTS:-}" =~ $ports ]] || fail 'peer-denied-ports must be space-separated ports.'
+read -ra control_plane_denied <<<"$CONTROL_PLANE_DENIED_PORTS"
+read -ra peer_denied <<<"$PEER_DENIED_PORTS"
+
+tcp_open() { timeout 5 bash -c ">/dev/tcp/$1/$2" 2>/dev/null; }
+
+peers=$(tailscale status --json | jq -c --arg tag "$CONTROL_PLANE_TAG" '
+    [(.Peer // {})[] | {name: .DNSName, ip: ((.TailscaleIPs // [])[0] // ""),
+        kind: (if (.Tags // []) == [$tag] then "controlplane" else "other" end)}]
+') || fail 'Reading tailscale status failed.'
+jq -e 'any(.[]; .kind == "controlplane" and .ip != "")' <<<"$peers" >/dev/null ||
+    fail "No $CONTROL_PLANE_TAG peer is visible; the Kubernetes API is unreachable."
+
+while IFS=$'\t' read -r kind name ip; do
+    if [[ -z "$ip" ]]; then
+        echo "$name: no Tailscale IP, not probed."
+        continue
+    fi
+    note=''
+    if [[ "$kind" == controlplane ]]; then
+        open=false
+        for attempt in 1 2 3; do
+            if tcp_open "$ip" "$CONTROL_PLANE_PORT"; then open=true; break; fi
+            ((attempt == 3)) || sleep 2
+        done
+        [[ "$open" == true ]] || fail "Control plane $name ($ip) is not reachable on TCP $CONTROL_PLANE_PORT."
+        denied=("${control_plane_denied[@]}")
+        note="; $CONTROL_PLANE_PORT reachable"
+    else
+        denied=("${peer_denied[@]}")
+    fi
+    for port in "${denied[@]}"; do
+        if tcp_open "$ip" "$port"; then fail "$name ($ip) is reachable on TCP $port."; fi
+    done
+    echo "$name: TCP ${denied[*]} denied$note."
+done < <(jq -r '.[] | [.kind, .name, .ip] | @tsv' <<<"$peers")

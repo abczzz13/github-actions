@@ -1,0 +1,84 @@
+name: Tailnet Kubernetes access
+description: Join a tailnet with workload identity, check that only the Kubernetes API is reachable, write an OIDC kubeconfig and check the resulting Kubernetes user.
+inputs:
+  tailscale-oauth-client-id:
+    description: Tailscale OAuth client ID of the trust credential for GitHub workload identity. An identifier, not a secret.
+    required: true
+  tailscale-audience:
+    description: ID token audience that the Tailscale trust credential accepts.
+    required: true
+  tailscale-tags:
+    description: Comma-separated Tailscale tags for the ephemeral node.
+    required: true
+  tailscale-version:
+    description: Tailscale client version.
+    default: "1.104.2"
+  control-plane-tag:
+    description: The single Tailscale tag of the Kubernetes control-plane nodes.
+    required: true
+  control-plane-port:
+    description: TCP port that every control plane must accept.
+    default: "6443"
+  control-plane-denied-ports:
+    description: Space-separated TCP ports that every control plane must refuse.
+    default: "50000 22"
+  peer-denied-ports:
+    description: Space-separated TCP ports that every other visible peer must refuse.
+    default: "22 443 6443 8443 50000"
+  server:
+    description: Kubernetes API server URL. Must use HTTPS.
+    required: true
+  certificate-authority-data:
+    description: Base64-encoded PEM CA bundle that verifies the API server certificate. Not a secret.
+    required: true
+  audience:
+    description: ID token audience that the API server's JWT authenticator accepts.
+    required: true
+  namespace:
+    description: Namespace of the kubeconfig context, whose permissions are listed in the job summary.
+    required: true
+  expected-username:
+    description: Exact Kubernetes username that the API server must map the ID token to.
+    required: true
+outputs:
+  kubeconfig:
+    description: Path of the written kubeconfig. The action also sets KUBECONFIG for later steps.
+    value: ${{ steps.kubeconfig.outputs.kubeconfig }}
+runs:
+  using: composite
+  steps:
+    - uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+      with:
+        oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+        audience: ${{ inputs.tailscale-audience }}
+        tags: ${{ inputs.tailscale-tags }}
+        version: ${{ inputs.tailscale-version }}
+        timeout: 2m
+    - name: Check network boundary
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CONTROL_PLANE_TAG: ${{ inputs.control-plane-tag }}
+        CONTROL_PLANE_PORT: ${{ inputs.control-plane-port }}
+        CONTROL_PLANE_DENIED_PORTS: ${{ inputs.control-plane-denied-ports }}
+        PEER_DENIED_PORTS: ${{ inputs.peer-denied-ports }}
+      run: '"$ACTION_PATH/../scripts/tailnet-boundary-check"'
+    # The kubernetes-oidc script, not the action: a composite action can only
+    # reference other actions by repository and SHA, and this keeps one release.
+    - name: Write OIDC kubeconfig
+      id: kubeconfig
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SERVER: ${{ inputs.server }}
+        CA_DATA: ${{ inputs.certificate-authority-data }}
+        AUDIENCE: ${{ inputs.audience }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: '"$ACTION_PATH/../scripts/kubernetes-oidc"'
+    - name: Check Kubernetes identity
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        EXPECTED_USERNAME: ${{ inputs.expected-username }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: '"$ACTION_PATH/../scripts/kubernetes-identity-check"'

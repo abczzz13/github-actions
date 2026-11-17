@@ -1,0 +1,27 @@
+name: Resolve release
+description: Resolve an unprefixed semantic release tag to its commit and require that commit on the history of a reviewed commit.
+inputs:
+  tag:
+    description: Release tag, such as 1.2.3. Prefixed and pre-release tags are rejected.
+    required: true
+  reviewed-sha:
+    description: Full commit SHA whose history must contain the release commit. Defaults to the workflow commit.
+    default: ${{ github.sha }}
+outputs:
+  sha:
+    description: Full commit SHA of the release tag.
+    value: ${{ steps.resolve.outputs.sha }}
+  version:
+    description: The validated release version, equal to tag.
+    value: ${{ steps.resolve.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve release
+      id: resolve
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        TAG: ${{ inputs.tag }}
+        REVIEWED_SHA: ${{ inputs.reviewed-sha }}
+      run: '"$ACTION_PATH/../scripts/resolve-release"'

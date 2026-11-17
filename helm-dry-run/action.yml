@@ -1,0 +1,40 @@
+name: Helm dry run
+description: Check a Helm release against the live cluster with a server-side dry run and a server-side diff, without installing it or changing live objects.
+inputs:
+  release:
+    description: Helm release name.
+    required: true
+  chart:
+    description: Path of the chart directory.
+    required: true
+  namespace:
+    description: Release namespace.
+    required: true
+  values:
+    description: Newline-separated values files, applied in order.
+    default: ""
+  set-string:
+    description: Newline-separated key=value pairs passed as --set-string, applied after the values files. Values may not contain commas.
+    default: ""
+  kube-version-file:
+    description: File holding the Kubernetes version, such as 1.35.0, for the offline render that is diffed. Empty uses Helm's default.
+    default: ""
+outputs:
+  changed:
+    description: "'true' when the rendered objects differ from the live objects."
+    value: ${{ steps.dry-run.outputs.changed }}
+runs:
+  using: composite
+  steps:
+    - name: Helm dry run
+      id: dry-run
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        RELEASE: ${{ inputs.release }}
+        CHART: ${{ inputs.chart }}
+        NAMESPACE: ${{ inputs.namespace }}
+        VALUES: ${{ inputs.values }}
+        SET_STRING: ${{ inputs.set-string }}
+        KUBE_VERSION_FILE: ${{ inputs.kube-version-file }}
+      run: '"$ACTION_PATH/../scripts/helm-dry-run"'

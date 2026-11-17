@@ -10,6 +10,8 @@ updates:
       - /commit-policy
       - /commitizen-bump
       - /resolve-image
+      - /setup-helm
+      - /tailnet-kubernetes-access
       - /terraform-quality
       - /terraform-plan
       - /terraform-apply

@@ -1,7 +1,7 @@
 # Shared GitHub Actions
 
 Small, versioned CI building blocks for `abczzz13/wbso-backend`,
-`abczzz13/forklog-backend`, `tdejongio/forklog-frontend` and the Terraform
+`tdejongio/forklog-backend`, `tdejongio/forklog-frontend` and the Terraform
 repository `tdejongio/forklog-infra`.
 Consumers pin a full commit SHA, not `main` or a
 moving version tag, with the version as a trailing comment. Dependabot
@@ -24,8 +24,12 @@ explicit timeouts and read-only `contents` permissions unless a job publishes.
 | `semgrep` | Uses pinned scanner and rules. `rules` is a newline-separated list of relative paths within the rule checkout; defaults to Go injection/deserialization. Ignores vendor and the rule checkout. Reserves `.semgrep-rules/` in the caller workspace; add it to the caller's `.gitignore`. |
 | `commit-policy` | Checks `message`, or HEAD's commit message when omitted, using the same Commitizen version as the bump action. The caller checks PR titles on `edited` as well as normal PR events. |
 | `commitizen-bump` | Requires `token` and `validated-sha`; optional `branch` defaults to `main`. Outputs `created`, `version`, `tag`, and `sha`. See release safety below. |
-| `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Requires Docker CLI and Engine 28.1+ (API 1.49+). Installs the pinned buildx without selecting a builder or starting a separate BuildKit container. See the image resolution contract. |
+| `resolve-image` | Resolves `image:tag` to an immutable digest, pulls that digest for `platform` (default `linux/amd64`), and checks the image's OS, architecture and OCI `revision` and `version` labels. The pull is intentional: it proves that every layer of the digest can be downloaded. Outputs `digest`. With `allow-missing: 'true'`, an absent tag outputs an empty digest; registry errors always fail. The caller logs in to the registry first. Requires Docker CLI and Engine 28.1+ (API 1.49+). Installs the pinned buildx without selecting a builder or starting a separate BuildKit container. See the image resolution contract. |
 | `kubernetes-oidc` | Writes a kubeconfig for `server` and `certificate-authority-data` whose exec credential requests a fresh GitHub Actions ID token for `audience` when the previous one is about to expire. Optional `namespace` sets the context namespace. Sets `KUBECONFIG` for later steps and outputs `kubeconfig`. Requires `id-token: write`, curl, jq and Python 3 with SSL support. See the Kubernetes OIDC contract. |
+| `resolve-release` | Resolves an unprefixed semantic release `tag` (such as `1.2.3`) to its commit and requires that commit on the history of `reviewed-sha` (default: the workflow commit). Outputs `sha` and `version`. The caller checks out with `fetch-depth: 0`. Branches with a release-like name never stand in for the tag. |
+| `tailnet-kubernetes-access` | Joins a tailnet with Tailscale workload identity, checks the network boundary, writes a `kubernetes-oidc` kubeconfig and checks the Kubernetes user. Outputs `kubeconfig` and sets `KUBECONFIG`. Requires `id-token: write`. See the tailnet Kubernetes access contract. |
+| `setup-helm` | Installs the shared Helm version and outputs it as `version`. Consumers that pin this repository at one SHA therefore use one Helm; compare a Nix or local Helm with `version` in CI. |
+| `helm-dry-run` | Checks a Helm release against the live cluster without installing it: `helm upgrade --install --take-ownership --dry-run=server`, then `kubectl diff --server-side --force-conflicts --field-manager=helm` of the rendered objects without hooks. Takes `release`, `chart`, `namespace`, newline-separated `values` files and `set-string` pairs (no commas), and an optional `kube-version-file` holding the Kubernetes version for the offline render. Outputs `changed` and writes the differences to the job summary. Requires Helm 4 (run `setup-helm` first), kubectl and a kubeconfig. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |
@@ -105,7 +109,8 @@ username comes from the cluster's claim mapping, not from this action.
   valid namespace name.
 - `job_workflow_ref` names the workflow file that runs the job. Inside a
   reusable workflow that is the reusable workflow, not its caller, so write the
-  cluster's claim rules to match. Network access to the API server, for
+  cluster's claim rules to match. Composite actions, including this one and
+  `tailnet-kubernetes-access`, do not change it. Network access to the API server, for
   example through a VPN, is the caller's job and comes in an earlier step.
 
 ```yaml
@@ -123,8 +128,64 @@ deploy:
         certificate-authority-data: ${{ vars.KUBERNETES_CA_DATA }}
         audience: infra-k8s-apps
         namespace: app-test
-    - run: helm upgrade --install app ./deploy/chart --atomic --wait --timeout 15m
+    - run: helm upgrade --install app ./deploy/chart --rollback-on-failure --wait --timeout 15m
 ```
+
+### Tailnet Kubernetes access contract
+
+`tailnet-kubernetes-access` is for a cluster whose API server is reachable
+only over a tailnet. It runs these steps, and any failure stops the job before
+a later step:
+
+1. Joins the tailnet with `tailscale/github-action` using the trust credential
+   `tailscale-oauth-client-id`, the ID token `tailscale-audience` and
+   `tailscale-tags`. The caller grants `id-token: write`.
+2. Checks the network boundary. At least one peer must carry exactly the tag
+   `control-plane-tag`. Every control plane must accept TCP
+   `control-plane-port` (three attempts) and refuse `control-plane-denied-ports`.
+   Every other visible peer must refuse `peer-denied-ports`. Tailscale also lists
+   peers that may only connect to the runner, such as operators' devices, so a
+   visible peer is probed rather than assumed reachable. Peers without a
+   Tailscale IP are logged and skipped.
+3. Writes a kubeconfig exactly as `kubernetes-oidc` does, with `server`,
+   `certificate-authority-data`, `audience` and `namespace`.
+4. Requires `kubectl auth whoami` to return exactly `expected-username` and the
+   identity to be denied `list nodes`, `create namespaces` and
+   `list secrets --all-namespaces`. A `can-i` answer other than `no`, including
+   an API error, fails. The job summary lists the user and its permissions in
+   `namespace`.
+
+The defaults deny SSH, HTTPS, the Kubernetes API, 8443 and Talos 50000 on
+other peers, and Talos and SSH on the control planes. Run it as a direct step
+of the job whose identity the cluster trusts; it is a composite action, so
+`job_workflow_ref` stays that of the calling workflow.
+
+```yaml
+- uses: abczzz13/github-actions/tailnet-kubernetes-access@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+  with:
+    tailscale-oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+    tailscale-audience: ${{ vars.TS_OIDC_AUDIENCE }}
+    tailscale-tags: tag:app-deployer
+    control-plane-tag: tag:k8s-controlplane
+    server: ${{ vars.KUBERNETES_SERVER }}
+    certificate-authority-data: ${{ vars.KUBERNETES_CA_DATA }}
+    audience: k8s-apps
+    namespace: app-test
+    expected-username: github:repo:owner@1/app@2:environment:test
+- uses: abczzz13/github-actions/setup-helm@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+- uses: abczzz13/github-actions/helm-dry-run@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+  with:
+    release: app
+    chart: release/deploy/chart
+    namespace: app-test
+    values: release/deploy/chart/values-test.yaml
+    set-string: |
+      image.digest=${{ needs.source.outputs.digest }}
+      image.version=${{ needs.source.outputs.version }}
+```
+
+`helm-dry-run` never installs. Its server dry run does not run hooks, and the
+diff leaves hooks out, so a hook's prerequisites need their own check.
 
 ### Terraform contract
 

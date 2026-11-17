@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Checks the Kubernetes user that the current kubeconfig authenticates as, and
+# that authentication alone grants nothing cluster-wide. Lists the identity's
+# permissions in the namespace in the job summary.
+set -euo pipefail
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+[[ -n "${EXPECTED_USERNAME:-}" ]] || fail 'expected-username is required.'
+[[ ${#NAMESPACE} -le 63 && "${NAMESPACE:-}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    fail "Namespace '${NAMESPACE:-}' is not a valid Kubernetes namespace name."
+
+username=$(kubectl auth whoami -o json | jq -er '.status.userInfo.username') ||
+    fail 'The API server rejected the token or returned no username.'
+[[ "$username" == "$EXPECTED_USERNAME" ]] || fail "Authenticated as '$username', expected '$EXPECTED_USERNAME'."
+
+# can-i also exits non-zero on API errors, so require exactly "no". stderr
+# stays in the log: cluster-scoped resources produce warnings.
+for check in 'list nodes' 'create namespaces' 'list secrets --all-namespaces'; do
+    read -ra args <<<"$check"
+    answer=$(kubectl auth can-i "${args[@]}" || true)
+    [[ "$answer" == no ]] || fail "Expected the identity to be denied '$check', got: $answer"
+done
+echo "Authenticated as $username without cluster-wide permissions."
+
+{
+    echo "- Kubernetes user: \`$username\`"
+    echo "- Cluster-wide: denied \`list nodes\`, \`create namespaces\`, \`list secrets --all-namespaces\`"
+    echo "- Permissions in \`$NAMESPACE\`:"
+    echo
+    echo '```'
+    kubectl auth can-i --list --namespace "$NAMESPACE" 2>&1 | head -n 40 || true
+    echo '```'
+} >>"$GITHUB_STEP_SUMMARY"
