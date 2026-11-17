@@ -474,9 +474,17 @@ non-mutating formatting test; the Terraform one also covers a hidden root.
 A separate hosted recovery fixture uses a fake Terraform executable, never a real
 backend or provider. The action reuses it through `terraform-version`, which also
 covers the bring-your-own CLI path. It fails apply in a hidden root with synthetic emergency
-state, downloads the artifact and verifies its bytes; an ordinary failure must
-produce no artifact. It downloads by the action's output rather than predicting
-the generated name.
+state, downloads the artifact and verifies its SHA-256 digest and exact bytes;
+an ordinary failure must produce no artifact. It looks up the action's output
+name rather than predicting it. `tests/verify_terraform_recovery_artifact.py`
+polls the REST API for expected artifact availability with bounded backoff
+(up to 31 seconds of waits per lookup or download phase), because discovery can
+lag a successful upload. It retries
+transient service and network errors, but never authentication errors, digest
+mismatches or incorrect contents. API errors never count as proof of absence.
+Only the recovery fixture job has `actions: read` for these API calls. Local
+tests cover delayed discovery, exhausted retries, API errors, checksum and
+content failures, and keeping the token off blob-storage redirects.
 
 `tests/test_terraform_integration.py` also runs real Terraform against a localhost
 HTTP backend that rejects state writes. It verifies that the actual failed state

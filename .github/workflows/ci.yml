@@ -119,6 +119,9 @@ jobs:
     name: Terraform recovery (${{ matrix.failure }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     strategy:
       matrix:
         failure: [state, ordinary]
@@ -151,26 +154,14 @@ jobs:
           OUTCOME: ${{ steps.recovery.outcome }}
           ARTIFACT: ${{ steps.recovery.outputs.errored-state-artifact }}
         run: test "$OUTCOME" = failure && test -n "$ARTIFACT"
-      - name: Download emergency state, or prove there is no artifact
-        id: download
-        continue-on-error: true
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ${{ steps.recovery.outputs.errored-state-artifact }}
-          path: ${{ runner.temp }}/terraform-recovery-download
-      - name: Verify artifact content and ordinary-failure behavior
+      - name: Verify recovery artifact availability and bytes
         env:
           FAILURE: ${{ matrix.failure }}
-          DOWNLOAD: ${{ steps.download.outcome }}
-        run: |
-          if [[ "$FAILURE" == state ]]; then
-            test "$DOWNLOAD" = success
-            printf '{"fixture":"not-real-state"}\n' > "$RUNNER_TEMP/expected-recovery"
-            cmp "$RUNNER_TEMP/expected-recovery" "$RUNNER_TEMP/terraform-recovery-download/errored.tfstate"
-          else
-            test "$DOWNLOAD" = failure
-            test ! -e "$RUNNER_TEMP/terraform-recovery-download/errored.tfstate"
-          fi
+          ARTIFACT: ${{ steps.recovery.outputs.errored-state-artifact }}
+          GH_TOKEN: ${{ github.token }}
+        # Artifact discovery can lag a successful upload. Poll availability, not
+        # the test result; API errors must never count as proof of absence.
+        run: python3 tests/verify_terraform_recovery_artifact.py
   release:
     name: Tag release
     # Same-workflow gating on the CI jobs above satisfies the release rules in
