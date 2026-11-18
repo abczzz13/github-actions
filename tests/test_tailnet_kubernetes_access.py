@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -81,6 +82,22 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn(f"cp-1.: TCP {self.closed} denied; {self.api} reachable.", result.stdout)
         self.assertIn(f"laptop.: TCP {self.closed} denied.", result.stdout)
         self.assertIn("offline.: no Tailscale IP, not probed.", result.stdout)
+
+    def test_probes_run_in_parallel(self):
+        # Tailscale drops denied packets, so a closed port takes the whole
+        # timeout. A fake timeout adds one second to each of the 11 probes:
+        # one after another they would take at least 11 seconds.
+        write_executable(self.bin / "timeout", 'sleep 1\nshift\nexec "$@"')
+        devices = [{"DNSName": f"device-{index}.", "TailscaleIPs": [f"127.0.0.{index}"]} for index in range(3, 7)]
+        other = self.free_port("127.0.0.2")
+        started = time.monotonic()
+        result = self.check([self.control_plane(), *devices], PEER_DENIED_PORTS=f"{self.closed} {other}")
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 5, "probes ran one after another")
+        # Output keeps the peer order of tailscale status.
+        lines = result.stdout.splitlines()
+        self.assertEqual([line.split(":")[0] for line in lines], ["cp-1.", *[device["DNSName"] for device in devices]])
 
     def test_rejects_a_reachable_peer(self):
         open_port = self.listen("127.0.0.3")

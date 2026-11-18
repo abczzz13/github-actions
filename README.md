@@ -145,7 +145,9 @@ a later step:
    `control-plane-port` on at least one address (three attempts per address) and
    refuse `control-plane-denied-ports` on every IPv4 and IPv6 address.
    Every other visible peer must refuse `peer-denied-ports` on every address.
-   Ports must be between 1 and 65535. Tailscale also lists
+   Ports must be between 1 and 65535. Probes run in parallel (up to 32 at
+   once), because a denied port is usually dropped and waits for the 5-second
+   timeout; results are reported in peer order. Tailscale also lists
    peers that may only connect to the runner, such as operators' devices, so a
    visible peer is probed rather than assumed reachable. Peers without a
    Tailscale IP are logged and skipped.
@@ -457,7 +459,7 @@ HTTPS server and renewing credentials in one proxy process after early expiry
 (skipped without `kubectl` or `openssl`) in `tests/test_kubernetes_oidc.py`;
 release resolution against real Git tags in `tests/test_resolve_release.py`;
 network boundary checks against IPv4 and IPv6 loopback sockets, unnamed peers,
-and invalid port ranges in `tests/test_tailnet_kubernetes_access.py`;
+invalid port ranges and parallel probing in `tests/test_tailnet_kubernetes_access.py`;
 exact server-manifest reuse, private temporary files and cleanup on failure
 against fake tools in `tests/test_helm_dry_run.py`, plus real Helm 4 install and
 upgrade dry runs against a local API fixture in `tests/test_helm_integration.py`
