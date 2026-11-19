@@ -38,38 +38,95 @@ peers=$(tailscale status --json | jq -c --arg tag "$CONTROL_PLANE_TAG" '
 jq -e 'any(.[]; .kind == "controlplane" and (.ips | length) > 0)' <<<"$peers" >/dev/null ||
     fail "No $CONTROL_PLANE_TAG peer is visible; the Kubernetes API is unreachable."
 
+# Tailscale drops denied packets, so each closed port waits for the full
+# timeout. Run all probes at once and report in peer order afterwards.
+results=$(mktemp -d)
+trap 'rm -rf "$results"' EXIT
+
+# probe KEY ADDRESS PORT ATTEMPTS creates $results/KEY when the port accepts TCP.
+probe() {
+    local attempt
+    for ((attempt = 1; attempt <= $4; attempt++)); do
+        if tcp_open "$2" "$3"; then
+            : >"$results/$1"
+            return 0
+        fi
+        ((attempt == $4)) || sleep 2
+    done
+    return 0
+}
+
+max_probes=32
+running=0
+probe_pids=()
+probe_failed=false
+start_probe() {
+    if ((running >= max_probes)); then
+        wait -n || probe_failed=true
+        running=$((running - 1))
+    fi
+    probe "$@" &
+    probe_pids+=("$!")
+    running=$((running + 1))
+}
+
+names=() kinds=() addresses=()
 # Read JSON records, not tab-separated fields: Bash read collapses empty fields.
 while IFS= read -r peer; do
-    kind=$(jq -r '.kind' <<<"$peer")
-    name=$(jq -r '.name | if . == "" then "unnamed peer" else . end' <<<"$peer")
-    mapfile -t ips < <(jq -r '.ips[]' <<<"$peer")
+    names+=("$(jq -r '.name | if . == "" then "unnamed peer" else . end' <<<"$peer")")
+    kinds+=("$(jq -r '.kind' <<<"$peer")")
+    addresses+=("$(jq -r '.ips | join(" ")' <<<"$peer")")
+done < <(jq -c '.[]' <<<"$peers")
+
+denied_ports() {
+    if [[ "${kinds[$1]}" == controlplane ]]; then
+        echo "${control_plane_denied[*]}"
+    else
+        echo "${peer_denied[*]}"
+    fi
+}
+
+for peer in "${!names[@]}"; do
+    read -ra ips <<<"${addresses[$peer]}"
+    read -ra denied <<<"$(denied_ports "$peer")"
+    for address in "${!ips[@]}"; do
+        # A control plane needs one working API address. Denied ports must be
+        # closed on every IPv4 and IPv6 address, including unused API addresses.
+        if [[ "${kinds[$peer]}" == controlplane ]]; then
+            start_probe "$peer-$address-api" "${ips[$address]}" "$CONTROL_PLANE_PORT" 3
+        fi
+        for port in "${denied[@]}"; do
+            start_probe "$peer-$address-$((10#$port))" "${ips[$address]}" "$port" 1
+        done
+    done
+done
+# Bare wait ignores worker failures. Check every PID, including workers already
+# collected by wait -n, before treating missing result files as denied ports.
+for pid in "${probe_pids[@]}"; do
+    wait "$pid" || probe_failed=true
+done
+[[ "$probe_failed" == false ]] || fail 'A network probe failed before completing.'
+
+for peer in "${!names[@]}"; do
+    name=${names[$peer]}
+    read -ra ips <<<"${addresses[$peer]}"
+    read -ra denied <<<"$(denied_ports "$peer")"
     if ((${#ips[@]} == 0)); then
         echo "$name: no Tailscale IP, not probed."
         continue
     fi
-    if [[ "$kind" == controlplane ]]; then
-        denied=("${control_plane_denied[@]}")
-    else
-        denied=("${peer_denied[@]}")
-    fi
     open=false
-    for ip in "${ips[@]}"; do
-        # A control plane needs one working API address. Denied ports must be
-        # closed on every IPv4 and IPv6 address, including unused API addresses.
-        if [[ "$kind" == controlplane && "$open" == false ]]; then
-            for attempt in 1 2 3; do
-                if tcp_open "$ip" "$CONTROL_PLANE_PORT"; then open=true; break; fi
-                ((attempt == 3)) || sleep 2
-            done
-        fi
+    for address in "${!ips[@]}"; do
+        [[ ! -e "$results/$peer-$address-api" ]] || open=true
         for port in "${denied[@]}"; do
-            if tcp_open "$ip" "$port"; then fail "$name ($ip) is reachable on TCP $port."; fi
+            [[ ! -e "$results/$peer-$address-$((10#$port))" ]] ||
+                fail "$name (${ips[$address]}) is reachable on TCP $port."
         done
     done
     note=''
-    if [[ "$kind" == controlplane ]]; then
+    if [[ "${kinds[$peer]}" == controlplane ]]; then
         [[ "$open" == true ]] || fail "Control plane $name (${ips[*]}) is not reachable on TCP $CONTROL_PLANE_PORT."
         note="; $CONTROL_PLANE_PORT reachable"
     fi
     echo "$name: TCP ${denied[*]} denied$note."
-done < <(jq -c '.[]' <<<"$peers")
+done
