@@ -58,12 +58,15 @@ probe() {
 
 max_probes=32
 running=0
+probe_pids=()
+probe_failed=false
 start_probe() {
     if ((running >= max_probes)); then
-        wait -n
+        wait -n || probe_failed=true
         running=$((running - 1))
     fi
     probe "$@" &
+    probe_pids+=("$!")
     running=$((running + 1))
 }
 
@@ -97,7 +100,12 @@ for peer in "${!names[@]}"; do
         done
     done
 done
-wait
+# Bare wait ignores worker failures. Check every PID, including workers already
+# collected by wait -n, before treating missing result files as denied ports.
+for pid in "${probe_pids[@]}"; do
+    wait "$pid" || probe_failed=true
+done
+[[ "$probe_failed" == false ]] || fail 'A network probe failed before completing.'
 
 for peer in "${!names[@]}"; do
     name=${names[$peer]}

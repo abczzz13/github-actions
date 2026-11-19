@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -85,8 +86,8 @@ class BoundaryTests(unittest.TestCase):
 
     def test_probes_run_in_parallel(self):
         # Tailscale drops denied packets, so a closed port takes the whole
-        # timeout. A fake timeout adds one second to each of the 11 probes:
-        # one after another they would take at least 11 seconds.
+        # timeout. A fake timeout adds one second to each of the 10 probes:
+        # one after another they would take at least 10 seconds.
         write_executable(self.bin / "timeout", 'sleep 1\nshift\nexec "$@"')
         devices = [{"DNSName": f"device-{index}.", "TailscaleIPs": [f"127.0.0.{index}"]} for index in range(3, 7)]
         other = self.free_port("127.0.0.2")
@@ -98,6 +99,60 @@ class BoundaryTests(unittest.TestCase):
         # Output keeps the peer order of tailscale status.
         lines = result.stdout.splitlines()
         self.assertEqual([line.split(":")[0] for line in lines], ["cp-1.", *[device["DNSName"] for device in devices]])
+
+    def test_rejects_terminated_probe_workers(self):
+        # A failed worker must not look like a denied connection, either while
+        # scheduling probes or while waiting for the final workers.
+        write_executable(self.bin / "timeout", f'''for port; do :; done
+if [ "$port" = "{self.api}" ]; then exit 0; fi
+kill -TERM "$PPID"
+exit 1''')
+        for count in (1, 40):
+            with self.subTest(peers=count):
+                devices = [{"DNSName": f"device-{index}.", "TailscaleIPs": ["127.0.0.3"]}
+                           for index in range(count)]
+                result = self.check([self.control_plane(), *devices])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("A network probe failed before completing.", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_limits_concurrent_probes(self):
+        counts = self.bin / "probe-counts.json"
+        counts.write_text(json.dumps({"active": 0, "maximum": 0, "started": 0}))
+        timeout_script = self.bin / "timeout.py"
+        timeout_script.write_text(f'''import fcntl
+import json
+import sys
+import time
+
+
+def update(delta):
+    with open({str(counts)!r}, "r+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        counts = json.load(stream)
+        counts["active"] += delta
+        counts["maximum"] = max(counts["maximum"], counts["active"])
+        counts["started"] += int(delta > 0)
+        stream.seek(0)
+        json.dump(counts, stream)
+        stream.truncate()
+
+
+update(1)
+time.sleep(0.2)
+update(-1)
+sys.exit(0 if sys.argv[-1] == {str(self.api)!r} else 1)
+''')
+        write_executable(self.bin / "timeout", f'exec "{sys.executable}" "{timeout_script}" "$@"')
+        devices = [{"DNSName": f"device-{index}.", "TailscaleIPs": ["127.0.0.3"]} for index in range(70)]
+        result = self.check([self.control_plane(), *devices])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(counts.read_text())
+        self.assertEqual(observed["started"], 72)
+        self.assertEqual(observed["active"], 0)
+        self.assertGreater(observed["maximum"], 1)
+        self.assertLessEqual(observed["maximum"], 32)
+        self.assertEqual(len(result.stdout.splitlines()), 71)
 
     def test_rejects_a_reachable_peer(self):
         open_port = self.listen("127.0.0.3")

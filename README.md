@@ -459,7 +459,8 @@ HTTPS server and renewing credentials in one proxy process after early expiry
 (skipped without `kubectl` or `openssl`) in `tests/test_kubernetes_oidc.py`;
 release resolution against real Git tags in `tests/test_resolve_release.py`;
 network boundary checks against IPv4 and IPv6 loopback sockets, unnamed peers,
-invalid port ranges and parallel probing in `tests/test_tailnet_kubernetes_access.py`;
+invalid port ranges, parallel probing, concurrency limits and worker failures in
+`tests/test_tailnet_kubernetes_access.py`;
 exact server-manifest reuse, private temporary files and cleanup on failure
 against fake tools in `tests/test_helm_dry_run.py`, plus real Helm 4 install and
 upgrade dry runs against a local API fixture in `tests/test_helm_integration.py`
