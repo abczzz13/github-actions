@@ -1,3 +1,14 @@
+## 2.3.1 (2026-11-19)
+
+### Fix
+
+- **deps**: bump zizmorcore/zizmor-action from 0.6.4 to 0.8.1 in /automation-quality in the actions group across 1 directory (#13)
+- **deps**: bump commitizen from 4.19.1 to 4.19.3 in /scripts (#15)
+
+### Perf
+
+- probe the tailnet boundary in parallel and run setup-helm on Node 24 (#19)
+
 ## 2.3.0 (2026-11-17)
 
 ### Feat
