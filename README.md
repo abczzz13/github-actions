@@ -29,7 +29,8 @@ explicit timeouts and read-only `contents` permissions unless a job publishes.
 | `resolve-release` | Resolves an unprefixed semantic release `tag` (such as `1.2.3`) to its commit and requires that commit on the history of `reviewed-sha` (default: the workflow commit). Outputs `sha` and `version`. The caller checks out with `fetch-depth: 0`. Branches with a release-like name never stand in for the tag. |
 | `tailnet-kubernetes-access` | Joins a tailnet with Tailscale workload identity, checks the network boundary, writes a `kubernetes-oidc` kubeconfig and checks the Kubernetes user. Outputs `kubeconfig` and sets `KUBECONFIG`. Requires `id-token: write`. See the tailnet Kubernetes access contract. |
 | `setup-helm` | Installs the shared Helm version and outputs it as `version`. Consumers that pin this repository at one SHA therefore use one Helm; compare a Nix or local Helm with `version` in CI. |
-| `helm-dry-run` | Checks a Helm release against the live cluster without installing it: `helm upgrade --install --take-ownership --dry-run=server`, then `kubectl diff --server-side --force-conflicts --field-manager=helm` of that exact server-rendered manifest without hooks. Takes `release`, `chart`, `namespace`, newline-separated `values` files and `set-string` pairs (no commas). The deprecated `kube-version-file` input is ignored; rendering uses the live cluster version. Outputs `changed` and writes the differences to the job summary. Requires Helm 4 (run `setup-helm` first), kubectl, jq and a kubeconfig. |
+| `helm-dry-run` | Checks a Helm release against the live cluster without installing it: `helm upgrade --install --dry-run=server` with the ownership flags that `helm-deploy` would use, then `kubectl diff --server-side --force-conflicts --field-manager=helm` of that exact server-rendered manifest without hooks. Takes `release`, `chart`, `namespace`, newline-separated `values` files and `set-string` pairs (no commas). The deprecated `kube-version-file` input is ignored; rendering uses the live cluster version. Outputs `changed` and writes the differences and the deploy mode to the job summary. Requires Helm 4 (run `setup-helm` first), kubectl, jq and a kubeconfig. |
+| `helm-deploy` | Installs or upgrades a Helm release with `helm upgrade --install --server-side=true --force-conflicts --wait`, and waits up to `timeout` (default `15m`) for the release and each hook. Takes the same `release`, `chart`, `namespace`, `values` and `set-string` inputs as `helm-dry-run`. Outputs `revision` and `mode` (`adopt` or `upgrade`), and writes the result to the job summary. Requires Helm 4 (run `setup-helm` first), jq and a kubeconfig. See the Helm deploy contract. |
 | `terraform-quality` | Checks formatting repository-wide, then runs backend-free `init`, `validate` and TFLint for each of `roots` (default `environments/*`). Optional `run-tests: 'true'` runs offline tests. The caller owns `.tflint.hcl`. See the Terraform contract. |
 | `terraform-plan` | Initializes the backend of `root` and plans it. Outputs `changes`. |
 | `terraform-apply` | Plans `root` and applies exactly that plan. Requires `state-recovery`. Outputs `changes`, `errored-state-path` and `errored-state-artifact`. |
@@ -189,11 +190,98 @@ of the job whose identity the cluster trusts; it is a composite action, so
 ```
 
 `helm-dry-run` never installs. Its server dry run does not run hooks, and the
-diff leaves hooks out, so a hook's prerequisites need their own check. The diff
-uses the release manifest from that dry run, preserving upgrade state, cluster
-capabilities and `lookup` results. There is no second, offline render. The release
-JSON and manifest, including Secrets, stay in private temporary files that are
+diff leaves hooks out, so a hook's prerequisites need their own check. It reads
+the release history like `helm-deploy` and passes `--take-ownership` only in
+`adopt` mode, so it fails, like the deploy, when an upgrade would take over an
+object that the release did not create. It also rejects an uninstalled release,
+as described in the Helm deploy contract. The diff uses the release manifest
+from that dry run, preserving upgrade state, cluster capabilities and `lookup`
+results. There is no second, offline render. The release JSON and manifest, including Secrets, stay in private temporary files that are
 removed on exit. `kubectl diff` hides Secret values in the log and job summary.
+
+### Helm deploy contract
+
+`helm-deploy` chooses a mode from the release history and outputs it as `mode`:
+
+| Release history | Mode and flags | On failure |
+| --- | --- | --- |
+| No release, or no revision that ever succeeded | `adopt`: `--take-ownership` | The release is marked failed. Objects already applied stay, now with Helm metadata. The next run is an upgrade and adopts the rest. |
+| A `deployed` or `superseded` revision exists | `upgrade`: `--rollback-on-failure` | Helm tries to roll back to the last successful revision. |
+| Latest revision `uninstalled` (kept with `--keep-history`) | None: the action fails | Nothing changes. Review the history and the remaining objects, then reinstall manually. |
+
+`--rollback-on-failure` is never used before a successful revision. On an
+install it makes Helm uninstall the release on failure, which deletes every
+object the release adopted, for example workloads that Flux created. Helm
+treats a release whose latest revision is `uninstalled` as a new install, even
+when older revisions succeeded, so the action refuses it.
+
+`--take-ownership` is never used after a successful revision, so an upgrade
+cannot silently take over an object that the release did not create. In
+`adopt` mode it skips Helm's ownership check completely: Helm takes objects
+without Helm metadata, and also objects of another Helm release, such as one
+that a Flux `HelmRelease` manages. Check the `helm-dry-run` differences before
+the first deploy.
+
+**Flux.** Before the first deploy, stop Flux from reconciling the adopted
+objects, for example by suspending the Kustomization. Otherwise Flux and Helm
+both apply them. If you later remove the objects from a Kustomization with
+`prune: true`, Flux deletes them, although Helm now owns them. Annotate them
+with `kustomize.toolkit.fluxcd.io/prune: disabled` first, or set `prune: false`
+on the Kustomization.
+
+**Failures.** The job summary reports the latest revision and its status after
+a failure: whether Helm failed before it changed the release, rolled back, or
+did not complete the rollback. A rollback does not undo a hook that already
+ran, such as a database migration. Set `timeout` above the longest hook
+deadline plus image pull time: when it expires, Helm fails the release while
+the hook may still run. Run `helm-dry-run` first in the same job to record the
+differences.
+
+**Waiting.** `--wait` waits for the release's objects and each hook. It does
+not wait for Jobs that are not hooks; make a Job a hook if the deploy must wait
+for it.
+
+**Concurrency.** Serialize deploys of one release with a `concurrency` group
+with `cancel-in-progress: false`, and never cancel a running deploy. Set the
+job `timeout-minutes` above twice `timeout` plus a margin, because a rollback
+waits for up to `timeout` again. When a deploy is cancelled or the runner
+stops, Helm can leave the release in a pending status.
+
+**Pending releases.** Helm refuses to start while the latest revision has a
+`pending-install`, `pending-upgrade` or `pending-rollback` status, so every
+later run fails. First confirm with `helm history` that no deploy is running.
+Then delete the storage Secret of the pending revision,
+`sh.helm.release.v1.<release>.v<revision>` in the release namespace (with
+Helm's default `secret` storage driver). Helm then sees the revision before it
+as the latest, and the next run continues from there; server-side apply
+converges the objects. Do not run `helm uninstall`: it deletes the objects,
+including adopted ones.
+
+The release JSON, which contains rendered Secrets, stays in a private temporary
+file that is removed on exit. The job summary shows only the revision and
+status.
+
+```yaml
+- uses: abczzz13/github-actions/helm-deploy@REVIEWED_COMMIT_SHA # REVIEWED_VERSION
+  with:
+    release: app
+    chart: release/deploy/chart
+    namespace: app-test
+    values: release/deploy/chart/values-test.yaml
+    set-string: |
+      image.digest=${{ needs.source.outputs.digest }}
+      image.version=${{ needs.source.outputs.version }}
+    timeout: 15m
+```
+
+```yaml
+jobs:
+  deploy:
+    timeout-minutes: 40
+    concurrency:
+      group: helm-deploy-app-test
+      cancel-in-progress: false
+```
 
 ### Terraform contract
 

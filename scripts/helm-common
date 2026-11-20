@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Shared functions for the Helm actions. Source this file; do not run it. The
+# shebang marks it as Bash for ShellCheck and lint-automation.
+#
+# helm_release_args validates RELEASE, NAMESPACE, CHART, VALUES and SET_STRING,
+# requires Helm 4, and stores the common arguments in the array `args`.
+#
+# helm_release_mode reads the release history and sets `mode` and
+# `latest_revision`. helm-dry-run and helm-deploy both use it, so the dry run
+# checks the same ownership rules as the deploy.
+
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+
+helm_release_args() {
+    local name='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$' file value installed
+    # Match the pattern first: ${#VAR} fails under set -u when VAR is unset.
+    [[ "${RELEASE:-}" =~ $name && ${#RELEASE} -le 53 ]] || fail "Release '${RELEASE:-}' is not a valid Helm release name."
+    [[ "${NAMESPACE:-}" =~ $name && ${#NAMESPACE} -le 63 ]] ||
+        fail "Namespace '${NAMESPACE:-}' is not a valid Kubernetes namespace name."
+    [[ -n "${CHART:-}" && -f "$CHART/Chart.yaml" ]] || fail "No Helm chart at '${CHART:-}'."
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" && -n "${GITHUB_OUTPUT:-}" ]] || fail 'GITHUB_STEP_SUMMARY and GITHUB_OUTPUT must be set.'
+
+    args=("$RELEASE" "$CHART" --namespace "$NAMESPACE")
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        [[ -f "$file" ]] || fail "Values file '$file' does not exist."
+        args+=(--values "$file")
+    done <<<"${VALUES:-}"
+    # Helm splits --set-string on commas, so a value may not contain one.
+    while IFS= read -r value; do
+        [[ -n "$value" ]] || continue
+        [[ "$value" =~ ^[A-Za-z0-9_.-]+=[^,]*$ ]] || fail "set-string entry '$value' must be key=value without commas."
+        args+=(--set-string "$value")
+    done <<<"${SET_STRING:-}"
+
+    installed=$(helm version --template '{{ .Version }}') || fail 'Helm is not installed. Run setup-helm first.'
+    [[ "$installed" == v4.* ]] || fail "Helm 4 is required, found $installed."
+}
+
+# Sets `mode` from the history of RELEASE in NAMESPACE:
+#
+# - adopt: no release exists, or no revision ever succeeded. helm-deploy uses
+#   --take-ownership and no --rollback-on-failure.
+# - upgrade: a deployed or superseded revision exists. helm-deploy uses
+#   --rollback-on-failure and no --take-ownership.
+#
+# Also sets `latest_revision`, which is 0 when no release exists.
+#
+# Fails when the latest revision has status uninstalled, even if older
+# revisions succeeded. Helm installs such a release again, and on an install
+# --rollback-on-failure uninstalls the release instead of rolling it back.
+#
+# $1 is a private directory for the Helm JSON.
+# shellcheck disable=SC2034 # mode and latest_revision are for the caller.
+helm_release_mode() {
+    local directory=$1 exists latest succeeded
+    mode=adopt
+    latest_revision=0
+    # Helm 4 lists releases in every status. The history is read only when the
+    # release exists, because a missing release is an error for helm history.
+    helm list --namespace "$NAMESPACE" --filter "^${RELEASE}\$" --output json >"$directory/list.json"
+    exists=$(jq --arg release "$RELEASE" 'any(.[]; .name == $release)' "$directory/list.json") ||
+        fail 'Could not read the Helm release list.'
+    [[ "$exists" == true ]] || return 0
+
+    helm history "$RELEASE" --namespace "$NAMESPACE" --output json >"$directory/history.json"
+    latest=$(jq -er 'max_by(.revision) | "\(.revision | numbers) \(.status | strings)"' "$directory/history.json") ||
+        fail 'Could not read the latest Helm release revision.'
+    read -r latest_revision latest <<<"$latest"
+    [[ "$latest" != uninstalled ]] ||
+        fail "Release '$RELEASE' was uninstalled with retained history. Review the history and remaining objects before reinstalling manually."
+    succeeded=$(jq 'any(.[]; .status == "deployed" or .status == "superseded")' "$directory/history.json") ||
+        fail 'Could not read the Helm release history.'
+    if [[ "$succeeded" == true ]]; then
+        mode=upgrade
+    fi
+}

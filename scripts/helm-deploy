@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Installs or upgrades a Helm release and waits until it is ready.
+#
+# helm_release_mode (scripts/helm-common) picks the mode from the release
+# history:
+#
+# - adopt (no successful revision yet: first install, or every earlier attempt
+#   failed): --take-ownership skips Helm's ownership check, so Helm adopts
+#   existing objects. These can be objects without Helm metadata, such as those
+#   that Flux kustomize-controller created, and also objects of another Helm
+#   release. --rollback-on-failure is left out, because on an install Helm then
+#   uninstalls the release on failure, and that deletes every adopted object. A
+#   failed attempt leaves the objects in place and a failed release, and the
+#   next run continues as an upgrade.
+# - upgrade (a successful revision exists): --rollback-on-failure tries to
+#   return to it on failure. --take-ownership is left out, so an upgrade cannot
+#   silently adopt an object that the release did not create.
+#
+# Both use server-side apply with --force-conflicts, so that Helm takes over
+# fields that another field manager set, and --wait with TIMEOUT. TIMEOUT also
+# bounds each hook, such as a migration Job. --wait does not wait for Jobs that
+# are not hooks.
+set -euo pipefail
+
+# shellcheck source=scripts/helm-common
+source "$(dirname "${BASH_SOURCE[0]}")/helm-common"
+helm_release_args
+[[ "${TIMEOUT:-}" =~ ^[1-9][0-9]*[smh]$ ]] ||
+    fail "Timeout '${TIMEOUT:-}' must be a number and one unit (s, m or h), such as 15m."
+
+umask 077
+directory=$(mktemp -d)
+trap 'rm -rf "$directory"' EXIT
+
+helm_release_mode "$directory"
+previous_revision=$latest_revision
+flags=(--server-side=true --force-conflicts --wait --timeout "$TIMEOUT")
+if [[ "$mode" == upgrade ]]; then
+    flags+=(--rollback-on-failure)
+else
+    flags+=(--take-ownership)
+fi
+
+# The release JSON contains the rendered manifest, including Secrets. Keep it
+# private and read only the revision and status from it.
+status=0
+helm upgrade --install "${args[@]}" "${flags[@]}" --output json >"$directory/release.json" || status=$?
+if ((status != 0)); then
+    # Report the state that Helm left. Helm can fail before it changes the
+    # release, and the rollback itself can fail. Only the revision and status
+    # are read: the description can contain parts of rendered objects.
+    after=$(helm history "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null |
+        jq -er 'max_by(.revision) | "\(.revision | numbers) \(.status | strings)"') || after=''
+    revision='' state=''
+    read -r revision state <<<"$after" || true
+    {
+        echo "**Helm ${mode} of \`$RELEASE\` in \`$NAMESPACE\` failed.** Read the Helm error in the step log."
+        echo
+        if [[ -z "$after" && "$previous_revision" == 0 ]]; then
+            echo 'No release exists after the failure, so Helm applied no objects.'
+        elif [[ -z "$after" ]]; then
+            echo "The release history could not be read after the failure. Run \`helm history\` to see the state."
+        elif ((revision == previous_revision)); then
+            echo "Helm failed before it changed the release. Revision $revision still has status \`$state\`."
+        else
+            echo "The latest revision is $revision, with status \`$state\`."
+            echo
+            case "$mode:$state" in
+                upgrade:deployed)
+                    echo 'Helm rolled back to the last successful revision. A hook that already ran, such as a migration, is not undone.'
+                    ;;
+                upgrade:*)
+                    echo 'Helm did not complete the rollback. Some objects may be from the failed revision. A hook that already ran, such as a migration, is not undone.'
+                    ;;
+                adopt:*)
+                    echo 'No successful revision existed, so Helm did not roll back or uninstall. Objects that Helm already applied stay in place.'
+                    echo 'The next run continues as an upgrade and adopts the remaining objects.'
+                    ;;
+            esac
+        fi
+        if [[ "$state" == pending-* ]]; then
+            echo
+            echo 'A pending release blocks every later run. See "Pending releases" in the Helm deploy contract of abczzz13/github-actions.'
+        fi
+    } >>"$GITHUB_STEP_SUMMARY"
+    exit "$status"
+fi
+
+revision=$(jq -er '.version | numbers' "$directory/release.json") || fail 'Helm returned no release revision.'
+state=$(jq -er '.info.status | strings' "$directory/release.json") || fail 'Helm returned no release status.'
+[[ "$state" == deployed ]] || fail "Helm finished with release status '$state', not deployed."
+{
+    echo "revision=$revision"
+    echo "mode=$mode"
+} >>"$GITHUB_OUTPUT"
+{
+    if [[ "$mode" == adopt ]]; then
+        echo "**Deployed \`$RELEASE\` in \`$NAMESPACE\` as revision $revision with \`--take-ownership\`, because the release had no successful revision. The release is ready.**"
+    else
+        echo "**Upgraded \`$RELEASE\` in \`$NAMESPACE\` to revision $revision. The release is ready.**"
+    fi
+} >>"$GITHUB_STEP_SUMMARY"
