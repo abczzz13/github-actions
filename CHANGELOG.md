@@ -1,3 +1,9 @@
+## 2.4.0 (2026-11-20)
+
+### Feat
+
+- add helm-deploy action for Helm installs and upgrades (#20)
+
 ## 2.3.1 (2026-11-19)
 
 ### Fix
