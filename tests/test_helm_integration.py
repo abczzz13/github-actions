@@ -23,14 +23,19 @@ class HelmIntegrationTests(unittest.TestCase):
             self.skipTest("Helm 4 is required")
 
         requests = []
-        installed = False
-        release = {
-            "name": "app", "namespace": "app-test", "version": 1,
-            "info": {"status": "deployed"},
-            "chart": {"metadata": {"name": "app", "version": "1.0.0", "apiVersion": "v2"}},
-            "manifest": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n",
-        }
-        encoded = base64.b64encode(gzip.compress(json.dumps(release).encode())).decode()
+        # Status of the stored revision 1, or None when no release exists. Real
+        # helm list and helm history read it, so this also checks the JSON
+        # fields that helm_release_mode depends on.
+        stored = None
+
+        def encode(status):
+            release = {
+                "name": "app", "namespace": "app-test", "version": 1,
+                "info": {"status": status},
+                "chart": {"metadata": {"name": "app", "version": "1.0.0", "apiVersion": "v2"}},
+                "manifest": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n",
+            }
+            return base64.b64encode(gzip.compress(json.dumps(release).encode())).decode()
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -57,10 +62,10 @@ class HelmIntegrationTests(unittest.TestCase):
                     item = {
                         "kind": "ConfigMap", "apiVersion": "v1",
                         "metadata": {"name": "sh.helm.release.v1.app.v1", "namespace": "app-test",
-                                     "labels": {"name": "app", "owner": "helm", "status": "deployed", "version": "1"}},
-                        "data": {"release": encoded},
+                                     "labels": {"name": "app", "owner": "helm", "status": stored, "version": "1"}},
+                        "data": {"release": encode(stored)} if stored else {},
                     }
-                    result = {"kind": "ConfigMapList", "apiVersion": "v1", "items": [item] if installed else []}
+                    result = {"kind": "ConfigMapList", "apiVersion": "v1", "items": [item] if stored else []}
                 elif path == "/api/v1/namespaces/app-test/configmaps/source":
                     result = {"kind": "ConfigMap", "apiVersion": "v1", "metadata": {"name": "source"},
                               "data": {"value": "from-cluster"}}
@@ -150,12 +155,15 @@ exit 2''')
                     "VALUES": "", "SET_STRING": "", "MANIFEST_LOG": str(manifest),
                     "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_STEP_SUMMARY": str(directory / "summary"),
                 }
-                for installed in (False, True):
-                    with self.subTest(installed=installed):
+                summary = directory / "summary"
+                for stored, deploy_mode in ((None, "adopt"), ("failed", "adopt"), ("deployed", "upgrade")):
+                    with self.subTest(stored=stored):
+                        summary.write_text("")
                         result = subprocess.run([str(ROOT / "scripts/helm-dry-run")], env=env,
                                                 capture_output=True, text=True, timeout=30)
                         self.assertEqual(result.returncode, 0, result.stderr)
                         rendered = manifest.read_text()
+                        installed = stored is not None
                         mode = "upgrade" if installed else "install"
                         self.assertIn(f'mode: "{mode}"', rendered)
                         self.assertIn('source: "from-cluster"', rendered)
@@ -163,6 +171,13 @@ exit 2''')
                         self.assertEqual("upgrade-only" in rendered, installed)
                         self.assertNotIn("hook-only", rendered)
                         self.assertNotIn("private-integration-secret", result.stdout + result.stderr)
+                        self.assertIn(f"Checked in `{deploy_mode}` mode", summary.read_text())
+                with self.subTest(stored="uninstalled"):
+                    stored = "uninstalled"
+                    result = subprocess.run([str(ROOT / "scripts/helm-dry-run")], env=env,
+                                            capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("uninstalled with retained history", result.stderr)
                 self.assertIn("/api/v1/namespaces/app-test/configmaps/source", requests)
                 self.assertFalse(any(path.startswith("WRITE ") for path in requests), requests)
         finally:

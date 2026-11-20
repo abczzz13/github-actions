@@ -8,6 +8,7 @@ import unittest
 from helpers import ROOT, write_executable
 
 SCRIPT = ROOT / "scripts/helm-dry-run"
+EXISTS = '[{"name":"app","namespace":"app-test"}]'
 
 # The release contains an upgrade-only Secret and a hook outside the manifest.
 # Neither the release JSON nor its notes should reach the log or summary.
@@ -34,6 +35,8 @@ HELM_RESULT = json.dumps({
 HELM = """printf '%s\\n' "$*" >> "$HELM_LOG"
 case "$1" in
 version) echo "$HELM_VERSION" ;;
+list) printf '%s' "$HELM_LIST" ;;
+history) printf '%s' "$HELM_HISTORY" ;;
 upgrade) printf '%s' "$HELM_RESULT"; exit "$HELM_STATUS" ;;
 *) echo 'Unexpected Helm command' >&2; exit 99 ;;
 esac"""
@@ -71,6 +74,7 @@ class HelmDryRunTests(unittest.TestCase):
                 "GITHUB_OUTPUT": str(files["output"]), "HELM_LOG": str(files["helm.log"]),
                 "KUBECTL_LOG": str(files["kubectl.log"]), "HELM_VERSION": "v4.2.4",
                 "HELM_RESULT": HELM_RESULT, "HELM_STATUS": "0", "TMPDIR": str(work),
+                "HELM_LIST": "[]", "HELM_HISTORY": "[]",
                 "MANIFEST_LOG": str(files["manifest.log"]), "MODES_LOG": str(files["modes.log"]),
                 "RELEASE": "app", "CHART": str(chart), "NAMESPACE": "app-test",
                 "VALUES": f"{chart}/values-test.yaml\n", "SET_STRING": "image.digest=sha256:abc\nimage.version=1.2.3",
@@ -88,12 +92,41 @@ class HelmDryRunTests(unittest.TestCase):
                   "--set-string image.digest=sha256:abc --set-string image.version=1.2.3")
         self.assertEqual(read["helm.log"].splitlines(), [
             "version --template {{ .Version }}",
+            "list --namespace app-test --filter ^app$ --output json",
             f"upgrade --install {common} --take-ownership --dry-run=server --output json",
         ])
         self.assertRegex(read["kubectl.log"], r"^diff --namespace app-test --server-side --force-conflicts "
                                               r"--field-manager=helm --show-secrets=false --filename \S+\n$")
         self.assertEqual(read["output"], "changed=false\n")
         self.assertIn("The chart matches the live objects.", read["summary"])
+        self.assertIn("Checked in `adopt` mode", read["summary"])
+
+    def test_uses_the_ownership_rules_of_helm_deploy(self):
+        # Without --take-ownership after a successful revision, the dry run
+        # fails like the deploy when an upgrade would take over a foreign object.
+        cases = (
+            ('[{"revision":1,"status":"failed"}]', True, "Checked in `adopt` mode"),
+            ('[{"revision":1,"status":"deployed"}]', False, "Checked in `upgrade` mode"),
+            ('[{"revision":1,"status":"superseded"},{"revision":2,"status":"failed"}]', False,
+             "Checked in `upgrade` mode"),
+        )
+        for history, adopts, summary in cases:
+            with self.subTest(history=history):
+                result, read, _ = self.run_script(HELM_LIST=EXISTS, HELM_HISTORY=history)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("history app --namespace app-test --output json", read["helm.log"])
+                (command,) = [line for line in read["helm.log"].splitlines() if line.startswith("upgrade")]
+                self.assertEqual("--take-ownership" in command, adopts)
+                self.assertNotIn("--rollback-on-failure", command)
+                self.assertIn(summary, read["summary"])
+
+    def test_rejects_an_uninstalled_release_like_helm_deploy(self):
+        result, read, _ = self.run_script(
+            HELM_LIST=EXISTS, HELM_HISTORY='[{"revision":1,"status":"deployed"},{"revision":2,"status":"uninstalled"}]')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uninstalled with retained history", result.stderr)
+        self.assertNotIn("upgrade", read["helm.log"])
+        self.assertEqual(read["kubectl.log"], "")
 
     def test_diffs_the_exact_server_manifest_including_secrets_but_not_hooks(self):
         result, read, _ = self.run_script()
