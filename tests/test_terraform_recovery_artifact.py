@@ -100,8 +100,7 @@ class RecoveryArtifactTests(unittest.TestCase):
         self.assertEqual(self.read.call_count, 7)
 
     def test_rejects_invalid_list_responses_without_retrying(self):
-        responses = [b"not-json", b"[]", b"{}", b'{"artifacts":null}',
-                     b'{"total_count":1,"artifacts":[]}', b'{"total_count":false,"artifacts":[]}',
+        responses = [b"not-json", b"[]", b"{}", b'{"artifacts":null}', b'{"total_count":false,"artifacts":[]}',
                      b'{"total_count":1,"artifacts":[null]}', self.listing(name="other-artifact")]
         for response in responses:
             with self.subTest(response=response):
@@ -110,6 +109,23 @@ class RecoveryArtifactTests(unittest.TestCase):
                 with self.assertRaises((RuntimeError, ValueError)):
                     self.verify("ordinary")
         self.sleep.assert_not_called()
+
+    def test_waits_while_the_count_and_list_disagree(self):
+        lagging = json.dumps({"total_count": 1, "artifacts": []}).encode()
+        self.read.side_effect = [lagging, self.listing(), self.archive]
+        self.verify()
+        self.assertEqual(self.sleep.call_args_list, [call(1)])
+        self.assertIn("artifact is not visible yet", self.log.getvalue())
+
+    def test_a_persistent_count_mismatch_is_never_proof_of_absence(self):
+        for failure in ("state", "ordinary"):
+            with self.subTest(failure=failure):
+                self.read.reset_mock()
+                self.read.side_effect = None
+                self.read.return_value = json.dumps({"total_count": 1, "artifacts": []}).encode()
+                with self.assertRaisesRegex(RuntimeError, "failed after 7 attempts"):
+                    self.verify(failure)
+                self.assertEqual(self.read.call_count, 7)
 
     def test_rejects_invalid_artifact_metadata(self):
         for metadata in ({"expired": True}, {"id": 0}, {"id": True}, {"digest": None}, {"digest": ""}):
