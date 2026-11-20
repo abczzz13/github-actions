@@ -78,9 +78,14 @@ def verify(api_url, repository, run_id, name, failure, token):
         if not isinstance(response, dict) or not isinstance(response.get("artifacts"), list):
             raise RuntimeError("Invalid artifact-list response.")
         artifacts = response["artifacts"]
-        if (type(response.get("total_count")) is not int or response["total_count"] != len(artifacts)
-                or any(not isinstance(item, dict) or item.get("name") != name for item in artifacts)):
+        if type(response.get("total_count")) is not int:
+            raise RuntimeError("Invalid artifact-list response.")
+        if any(not isinstance(item, dict) or item.get("name") != name for item in artifacts):
             raise RuntimeError("Unexpected artifact-list results for the reserved name.")
+        if response["total_count"] != len(artifacts):
+            # Shortly after an upload, the count and the list can disagree. Wait
+            # for them to agree; a disagreement is never proof of absence.
+            raise ArtifactPending()
         if not artifacts and failure == "state":
             raise ArtifactPending()
         return artifacts
